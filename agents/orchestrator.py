@@ -369,6 +369,17 @@ class Orchestrator:
         except Exception as e:
             _log(f"[FAST-PATH] LocalRouter error — falling through to LLM: {e}")
 
+        # ── Offline guard — skip LLM entirely ────────────────────
+        try:
+            from core.resilience_monitor import get_monitor
+            if get_monitor().execution_mode == "LOCAL_ONLY":
+                _log("[LOCAL_ONLY] Offline — LLM skipped.")
+                _set_state("FAILED", "LOCAL_ONLY: no network")
+                _say("Offline mode active. Try a direct command.")
+                return []
+        except Exception:
+            pass  # monitor unavailable — proceed normally
+
         # ── FALLBACK PATH — LLM planning ──────────────────────────
         _log("[FALLBACK] Consulting cloud reasoning...")
         _set_state("RUNNING", f"Planning: {command_text[:50]}")
