@@ -1,14 +1,14 @@
 import sys
 import os
-import struct
 import time
 
+import numpy as np
 import pyaudio
 import pyttsx3
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from voice.listener import VoiceListener
+from voice.listener import VoiceListener, FRAME_LENGTH, DETECTION_THRESHOLD
 from voice.transcribe import process_speech
 from core.intent_router import IntentRouter
 from core.system_tray import start_tray
@@ -155,16 +155,19 @@ class AfroListener(VoiceListener):
         print("Listening for wake word...")
         while True:
             try:
-                raw = self.stream.read(
-                    self.porcupine.frame_length, exception_on_overflow=False
-                )
-                frame = struct.unpack_from("h" * self.porcupine.frame_length, raw)
-                result = self.porcupine.process(frame)
-                if result >= 0:
-                    print("\n=========================")
-                    print("AFRO LISTENING ACTIVATED")
-                    print("=========================\n")
-                    self._callback()
+                raw = self.stream.read(FRAME_LENGTH, exception_on_overflow=False)
+                frame = np.frombuffer(raw, dtype=np.int16)
+                prediction = self.oww_model.predict(frame)
+
+                for model_name, score in prediction.items():
+                    if score >= DETECTION_THRESHOLD:
+                        print("\n=========================")
+                        print("AFRO IS ACTIVE")
+                        print("=========================\n")
+                        self.oww_model.reset()
+                        self._callback()
+                        break
+
             except OSError as e:
                 print(f"[Audio error] {e}")
                 time.sleep(0.1)
