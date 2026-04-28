@@ -36,8 +36,17 @@ def init_db() -> None:
                 content     TEXT    NOT NULL UNIQUE
             );
 
-            CREATE INDEX IF NOT EXISTS idx_intent    ON commands(intent);
-            CREATE INDEX IF NOT EXISTS idx_timestamp ON commands(timestamp);
+            CREATE TABLE IF NOT EXISTS reminders (
+                id             INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at     TEXT    NOT NULL,
+                reminder_text  TEXT    NOT NULL,
+                due_at         TEXT    NOT NULL,
+                completed      INTEGER DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_intent       ON commands(intent);
+            CREATE INDEX IF NOT EXISTS idx_timestamp    ON commands(timestamp);
+            CREATE INDEX IF NOT EXISTS idx_reminder_due ON reminders(due_at);
         """)
         con.commit()
         con.close()
@@ -132,6 +141,39 @@ def get_failure_stats(limit: int = 500) -> dict[str, int]:
         ).fetchall()
         con.close()
     return {r["intent"]: r["cnt"] for r in rows}
+
+
+def add_reminder(reminder_text: str, due_iso: str) -> int:
+    with _lock:
+        con = _conn()
+        cur = con.execute(
+            "INSERT INTO reminders (created_at, reminder_text, due_at) VALUES (?,?,?)",
+            (datetime.utcnow().isoformat(), reminder_text, due_iso),
+        )
+        rid = cur.lastrowid
+        con.commit()
+        con.close()
+    return rid
+
+
+def get_due_reminders() -> list[dict]:
+    now_iso = datetime.utcnow().isoformat()
+    with _lock:
+        con = _conn()
+        rows = con.execute(
+            "SELECT * FROM reminders WHERE due_at <= ? AND completed = 0",
+            (now_iso,),
+        ).fetchall()
+        con.close()
+    return [dict(r) for r in rows]
+
+
+def complete_reminder(rid: int) -> None:
+    with _lock:
+        con = _conn()
+        con.execute("UPDATE reminders SET completed = 1 WHERE id = ?", (rid,))
+        con.commit()
+        con.close()
 
 
 # Initialise on import
