@@ -1,8 +1,29 @@
-pvporcupine
+# --- PHASE 1: VOICE FOUNDATION ---
+pvporcupine>=3.0.0
 faster-whisper
 pyaudio
 pyttsx3
-torch
+
+# --- PHASE 2 & 3: OS & PROCESS AGENTS ---
 psutil
+pyautogui
+pystray
+Pillow
+
+# --- PHASE 4 & 5: DEV LOOP & ORCHESTRATION ---
 langchain
+langchain-openai
 python-dotenv
+pyperclip
+requests
+
+# --- PHASE 6: DASHBOARD & TELEMETRY ---
+flask
+flask-socketio
+nvidia-ml-py3
+
+# --- PHASE 7 & 8: EVOLUTION & VOICE CLONING ---
+GitPython
+openai
+
+# Note: Phase 8 voice cloning requires coqui-tts; install it separately.
