@@ -73,7 +73,12 @@ class EvolutionEngine:
                 pyautogui.hotkey("ctrl", "end")
                 time.sleep(0.15)
             except pyautogui.FailSafeException:
-                self._say("Failsafe triggered. Aborting upgrade.")
+                self._say("Override detected. Standing down.")
+                try:
+                    from core.dashboard import set_exec_state
+                    set_exec_state("FAILED", "FAILSAFE")
+                except Exception:
+                    pass
                 self._set_state("IDLE")
                 return False
             except Exception as e:
@@ -103,7 +108,7 @@ class EvolutionEngine:
 
         except Exception as e:
             print(f"[EvolutionEngine] apply_self_upgrade failed: {e}", file=sys.stderr)
-            self._say(f"Upgrade failed due to an error. Check the console.")
+            self._say("Upgrade failed due to an error. Check the console.")
             self._set_state("IDLE")
             return False
 
@@ -118,7 +123,14 @@ class EvolutionEngine:
             self._say("Rebooting to apply updates.")
             time.sleep(1.5)
 
-            # STEP 2 — Full process replacement (no subprocess)
+            # STEP 2 — Emit dashboard event before process replacement
+            try:
+                from core.dashboard import socketio
+                socketio.emit("system_event", {"event": "REBOOTING"})
+            except Exception:
+                pass
+
+            # STEP 3 — Full process replacement (no subprocess)
             print("[EvolutionEngine] Replacing process via os.execv...")
             os.execv(sys.executable, ["python"] + sys.argv)
 
