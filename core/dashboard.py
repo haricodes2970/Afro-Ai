@@ -21,6 +21,15 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode="threading")
 _brain_feed: list[str] = []
 _brain_feed_lock = threading.Lock()
 
+_exec_state: dict = {"status": "IDLE", "current_action": "—"}
+_exec_lock = threading.Lock()
+
+
+def set_exec_state(status: str, action: str = "—") -> None:
+    with _exec_lock:
+        _exec_state["status"] = status
+        _exec_state["current_action"] = action
+
 
 def log_brain(message: str) -> None:
     with _brain_feed_lock:
@@ -60,6 +69,9 @@ def _telemetry_loop() -> None:
             except Exception:
                 pass
 
+            with _exec_lock:
+                exec_snap = dict(_exec_state)
+
             socketio.emit("telemetry", {
                 "cpu": cpu,
                 "ram": ram,
@@ -69,6 +81,8 @@ def _telemetry_loop() -> None:
                 "active_window": watcher_state.get("active_window", ""),
                 "focus_duration_minutes": watcher_state.get("focus_duration_minutes", 0),
                 "health_status": watcher_state.get("health_status", "NORMAL"),
+                "execution_status": exec_snap["status"],
+                "current_action": exec_snap["current_action"],
             })
         except Exception as e:
             print(f"[Dashboard] Telemetry error: {e}")
