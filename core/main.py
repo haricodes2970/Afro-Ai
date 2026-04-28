@@ -13,6 +13,7 @@ from voice.listener import VoiceListener, FRAME_LENGTH, DETECTION_THRESHOLD
 from voice.transcribe import process_speech
 from core.intent_router import IntentRouter
 from core.system_tray import start_tray
+from core.dashboard import start_dashboard, log_brain
 from agents.process_agent import ProcessAgent
 from agents.dev_agent import DevAgent
 
@@ -120,64 +121,77 @@ def _handle_dev_ops(intent_label: str, transcribed_text: str) -> None:
 
     if intent_label == "DEV_OPTIMIZE" or "optimize this" in transcribed_text.lower():
         speak("Analyzing code on clipboard...")
+        log_brain(f"DEV_OPTIMIZE triggered: {transcribed_text[:60]}")
         result = agent.optimize_code()
         if result:
             speak("Code optimized and ready to paste.")
+            log_brain("DEV_OPTIMIZE complete.")
         else:
             speak("Clipboard was empty or optimization failed.")
+            log_brain("DEV_OPTIMIZE failed — empty clipboard or LLM error.")
 
     elif intent_label == "DEV_EXPLAIN":
         speak("Analyzing code on clipboard...")
+        log_brain(f"DEV_EXPLAIN triggered: {transcribed_text[:60]}")
         result = agent.explain_code()
         if result:
             speak("Explanation ready. Check your clipboard.")
+            log_brain("DEV_EXPLAIN complete.")
         else:
             speak("Clipboard was empty or explanation failed.")
+            log_brain("DEV_EXPLAIN failed.")
 
     elif intent_label == "DEV_DEBUG":
         speak("Analyzing code on clipboard...")
+        log_brain(f"DEV_DEBUG triggered: {transcribed_text[:60]}")
         result = agent.debug_code()
         if result:
             speak("Debug complete. Fixed code is ready to paste.")
+            log_brain("DEV_DEBUG complete.")
         else:
             speak("Clipboard was empty or debug failed.")
+            log_brain("DEV_DEBUG failed.")
 
 
 def on_wake_word_detected() -> None:
     speak("Listening...")
+    log_brain("Wake word detected.")
 
     print("Capturing command...")
     audio_data = capture_audio()
 
     if not audio_data:
         print("[Warning] No audio captured.")
+        log_brain("Warning: no audio captured.")
         return
 
     try:
         transcribed_text = process_speech(audio_data)
     except Exception as e:
         print(f"[Transcription error] {e}")
+        log_brain(f"Transcription error: {e}")
         return
 
     if not transcribed_text:
         print("[Warning] Empty transcription.")
+        log_brain("Warning: empty transcription.")
         return
 
     print(f"User said: {transcribed_text}")
+    log_brain(f"User: {transcribed_text}")
 
     intent_label = _intent_router.route(transcribed_text)
     print(f"Intent: {intent_label}")
+    log_brain(f"Intent: {intent_label}")
 
     if intent_label == "PROCESS_OPS":
         _handle_process_ops(transcribed_text)
     elif intent_label in ("DEV_OPTIMIZE", "DEV_EXPLAIN", "DEV_DEBUG"):
-        # run in thread — LLM calls can take several seconds
-        t = threading.Thread(
+        threading.Thread(
             target=_handle_dev_ops,
             args=(intent_label, transcribed_text),
             daemon=True,
-        )
-        t.start()
+        ).start()
     else:
         speak(f"Routing to {intent_label}")
 
@@ -216,6 +230,10 @@ def main() -> None:
 
     start_tray()
     print("System tray initialized.")
+
+    start_dashboard()
+    print("Dashboard running at http://127.0.0.1:5000")
+    log_brain("Afro system started.")
 
     print("Initializing voice system...")
     listener = AfroListener(callback=on_wake_word_detected)
