@@ -1,79 +1,56 @@
 import os
 import sys
-import struct
 import time
 
+import numpy as np
 import pyaudio
-from dotenv import load_dotenv
 
-load_dotenv()
-
-
-ACCESS_KEY_PLACEHOLDERS = {
-    "your_access_key_here",
-    "your-picovoice-access-key",
-    "your_picovoice_access_key",
-    "paste_your_picovoice_access_key_here",
-    "replace_me",
-}
+SAMPLE_RATE = 16000
+FRAME_LENGTH = 1280  # openwakeword expects 80ms chunks at 16kHz
+DEFAULT_MODEL = "hey_jarvis"
+DETECTION_THRESHOLD = 0.5
 
 
 class VoiceListener:
-    def __init__(self):
-        self.porcupine = None
+    def __init__(self, model_path: str = DEFAULT_MODEL):
+        self.model_path = model_path
+        self.oww_model = None
         self.audio = None
         self.stream = None
-        self.access_key = os.getenv("PICOVOICE_ACCESS_KEY", "").strip()
-        self.wake_engine_status: str = "FALLBACK"
 
-    def _has_configured_access_key(self) -> bool:
-        if not self.access_key:
-            return False
-        return self.access_key.lower() not in ACCESS_KEY_PLACEHOLDERS
-
-    def _setup_porcupine(self):
-        import pvporcupine
-
-        try:
-            self.porcupine = pvporcupine.create(
-                access_key=self.access_key,
-                keywords=["porcupine"],
-            )
-            self.wake_engine_status = "ACTIVE"
-        except pvporcupine.PorcupineInvalidArgumentError as e:
-            print(f"[Porcupine] Invalid argument: {e}")
-            print("Porcupine initialization failed. Switching to fallback mode.")
-            self.wake_engine_status = "FALLBACK"
-            raise
-        except Exception as e:
-            print(f"[Porcupine] Initialization error: {e}")
-            print("Porcupine initialization failed. Switching to fallback mode.")
-            self.wake_engine_status = "FALLBACK"
-            raise
+    def _load_model(self):
+        from openwakeword.model import Model
+        self.oww_model = Model(
+            wakeword_models=[self.model_path],
+            inference_framework="onnx",
+        )
 
     def _setup_stream(self):
         self.audio = pyaudio.PyAudio()
         self.stream = self.audio.open(
-            rate=self.porcupine.sample_rate,
+            rate=SAMPLE_RATE,
             channels=1,
             format=pyaudio.paInt16,
             input=True,
-            frames_per_buffer=self.porcupine.frame_length,
+            frames_per_buffer=FRAME_LENGTH,
         )
 
     def _detection_loop(self):
         print("Listening for wake word...")
         while True:
             try:
-                raw = self.stream.read(
-                    self.porcupine.frame_length, exception_on_overflow=False
-                )
-                frame = struct.unpack_from("h" * self.porcupine.frame_length, raw)
-                result = self.porcupine.process(frame)
-                if result >= 0:
-                    print("\n=========================")
-                    print("AFRO LISTENING ACTIVATED")
-                    print("=========================\n")
+                raw = self.stream.read(FRAME_LENGTH, exception_on_overflow=False)
+                frame = np.frombuffer(raw, dtype=np.int16)
+                prediction = self.oww_model.predict(frame)
+
+                for model_name, score in prediction.items():
+                    if score >= DETECTION_THRESHOLD:
+                        print("\n=========================")
+                        print("AFRO IS ACTIVE")
+                        print("=========================\n")
+                        self.oww_model.reset()
+                        break
+
             except OSError as e:
                 print(f"[Audio error] {e}")
                 time.sleep(0.1)
@@ -84,14 +61,10 @@ class VoiceListener:
             self.stream.close()
         if self.audio is not None:
             self.audio.terminate()
-        if self.porcupine is not None:
-            self.porcupine.delete()
 
     def _fallback_mode(self, reason: str = ""):
         if reason:
             print(f"\n[Voice disabled] {reason}")
-        print("Set PICOVOICE_ACCESS_KEY in .env to enable wake-word detection.")
-        print("Get one at: https://console.picovoice.ai/")
 
         try:
             import speech_recognition as sr
@@ -109,7 +82,6 @@ class VoiceListener:
             return
 
         print("[Fallback] SpeechRecognition active. Speak freely — no wake word needed.\n")
-
         recognizer = sr.Recognizer()
 
         try:
@@ -151,23 +123,24 @@ class VoiceListener:
                 return
 
     def start(self):
-        if not self._has_configured_access_key():
-            self._fallback_mode("Picovoice AccessKey is missing or still a placeholder.")
-            return
-
         try:
-            self._setup_porcupine()
-        except Exception:
-            self._fallback_mode("Wake-word detection could not initialize.")
+            self._load_model()
+        except Exception as e:
+            print(f"[openwakeword] Model load failed: {e}")
+            self._fallback_mode("Wake-word model could not be loaded.")
             return
 
         try:
             self._setup_stream()
+        except OSError as e:
+            print(f"[Microphone setup error] {e}")
+            self._cleanup()
+            return
+
+        try:
             self._detection_loop()
         except KeyboardInterrupt:
             print("\n[Shutdown] KeyboardInterrupt received.")
-        except OSError as e:
-            print(f"[Microphone setup error] {e}")
         finally:
             self._cleanup()
 
