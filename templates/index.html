@@ -57,6 +57,32 @@
       </div>
     </div>
 
+    <!-- Focus Tracker -->
+    <div class="card focus-card">
+      <h3>⊙ Current Focus</h3>
+      <div class="focus-window" id="focusWindow">—</div>
+      <div class="focus-meta">
+        <span class="focus-duration" id="focusDuration">0 min</span>
+        <span class="health-badge" id="healthBadge" data-status="NORMAL">NORMAL</span>
+      </div>
+      <div class="health-bar-wrap">
+        <div class="health-bar-row">
+          <span class="health-bar-label">CPU</span>
+          <div class="health-bar-track">
+            <div class="health-bar-fill" id="cpuBar"></div>
+          </div>
+          <span class="health-bar-val" id="cpuBarVal">0%</span>
+        </div>
+        <div class="health-bar-row">
+          <span class="health-bar-label">VRAM</span>
+          <div class="health-bar-track">
+            <div class="health-bar-fill gpu" id="gpuBar"></div>
+          </div>
+          <span class="health-bar-val" id="gpuBarVal">0%</span>
+        </div>
+      </div>
+    </div>
+
     <!-- Brain Feed -->
     <div class="card feed-card">
       <h3>⟳ Brain Feed</h3>
@@ -120,6 +146,16 @@
       document.getElementById(valId).textContent = pct.toFixed(1) + "%";
     }
 
+    const STATUS_COLOR = { NORMAL: "#22c55e", WARNING: "#f59e0b", CRITICAL: "#ef4444" };
+
+    function setBar(fillId, valId, pct, status) {
+      const fill = document.getElementById(fillId);
+      const val  = document.getElementById(valId);
+      fill.style.width  = Math.min(pct, 100).toFixed(1) + "%";
+      fill.style.background = STATUS_COLOR[status] || STATUS_COLOR.NORMAL;
+      val.textContent = pct.toFixed(1) + "%";
+    }
+
     socket.on("telemetry", (data) => {
       setArc("cpuArc", "cpuVal", data.cpu);
       setArc("ramArc", "ramVal", data.ram);
@@ -135,6 +171,24 @@
 
       const clip = document.getElementById("clipPreview");
       clip.textContent = data.clipboard_preview || "—";
+
+      // Focus tracker
+      const status = data.health_status || "NORMAL";
+      const win    = data.active_window || "—";
+      const dur    = data.focus_duration_minutes || 0;
+
+      document.getElementById("focusWindow").textContent =
+        win.length > 60 ? win.slice(0, 57) + "…" : win;
+      document.getElementById("focusDuration").textContent = dur + " min";
+
+      const badge = document.getElementById("healthBadge");
+      badge.textContent = status;
+      badge.dataset.status = status;
+      badge.style.color = STATUS_COLOR[status] || STATUS_COLOR.NORMAL;
+      badge.style.borderColor = STATUS_COLOR[status] || STATUS_COLOR.NORMAL;
+
+      setBar("cpuBar",  "cpuBarVal",  data.cpu, status);
+      setBar("gpuBar",  "gpuBarVal",  data.gpu, status);
     });
 
     // Mute toggle
