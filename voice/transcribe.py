@@ -1,15 +1,29 @@
 import sys
 import numpy as np
+import torch
 from faster_whisper import WhisperModel
 
-_model = None
+_model: WhisperModel | None = None
+model_state: str = "RELEASED"
 
 
 def _get_model() -> WhisperModel:
-    global _model
+    global _model, model_state
     if _model is None:
-        _model = WhisperModel("base.en", device="cuda", compute_type="float16")
+        _model = WhisperModel(
+            "base.en",
+            device="cuda",
+            compute_type="int8_float16",
+        )
+        model_state = "LOADED"
     return _model
+
+
+def release_model() -> None:
+    global _model, model_state
+    _model = None
+    model_state = "RELEASED"
+    torch.cuda.empty_cache()
 
 
 def _to_float32(audio_data) -> np.ndarray | None:
