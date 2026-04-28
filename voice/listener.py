@@ -1,5 +1,6 @@
 import os
 import sys
+import subprocess
 import time
 
 import numpy as np
@@ -7,8 +8,51 @@ import pyaudio
 
 SAMPLE_RATE = 16000
 FRAME_LENGTH = 1280  # openwakeword expects 80ms chunks at 16kHz
-DEFAULT_MODEL = "hey_jarvis"
+DEFAULT_MODEL = "alexa"
 DETECTION_THRESHOLD = 0.5
+
+
+def _get_model_dir() -> str:
+    try:
+        import openwakeword
+        return os.path.join(os.path.dirname(openwakeword.__file__), "resources", "models")
+    except ImportError:
+        return ""
+
+
+def _model_exists(model_name: str) -> bool:
+    model_dir = _get_model_dir()
+    if not model_dir or not os.path.isdir(model_dir):
+        return False
+    return any(
+        f.lower().startswith(model_name.lower())
+        for f in os.listdir(model_dir)
+    )
+
+
+def _download_model(model_name: str) -> bool:
+    print(f"Wake word model not found. Downloading...")
+    try:
+        from openwakeword.utils import download_models
+        download_models([model_name])
+        return True
+    except Exception:
+        pass
+
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "openwakeword", "--download_models", model_name],
+            timeout=120,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            return True
+        print(f"[openwakeword] Download stderr: {result.stderr.strip()}")
+        return False
+    except Exception as e:
+        print(f"[openwakeword] Download failed: {e}")
+        return False
 
 
 class VoiceListener:
@@ -18,8 +62,24 @@ class VoiceListener:
         self.audio = None
         self.stream = None
 
+    def _resolve_model(self) -> bool:
+        name = os.path.basename(self.model_path).split(".")[0]
+        is_named = not os.path.isfile(self.model_path)
+
+        if is_named and not _model_exists(name):
+            ok = _download_model(name)
+            if not ok or not _model_exists(name):
+                print(f"[openwakeword] Model '{name}' unavailable after download attempt.")
+                return False
+
+        return True
+
     def _load_model(self):
         from openwakeword.model import Model
+
+        if not self._resolve_model():
+            raise RuntimeError(f"Model '{self.model_path}' could not be resolved.")
+
         self.oww_model = Model(
             wakeword_models=[self.model_path],
             inference_framework="onnx",
@@ -43,10 +103,10 @@ class VoiceListener:
                 frame = np.frombuffer(raw, dtype=np.int16)
                 prediction = self.oww_model.predict(frame)
 
-                for model_name, score in prediction.items():
+                for _model_name, score in prediction.items():
                     if score >= DETECTION_THRESHOLD:
                         print("\n=========================")
-                        print("AFRO IS ACTIVE")
+                        print("AFRO wake word detected")
                         print("=========================\n")
                         self.oww_model.reset()
                         break
