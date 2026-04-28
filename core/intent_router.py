@@ -37,7 +37,11 @@ print(f"[IntentRouter] Mode: {_llm_mode}")
 
 # ---
 
-VALID_LABELS = {"FILE_OPS", "PROCESS_OPS", "CALENDAR_OPS", "SYSTEM_QUERY", "UNKNOWN"}
+VALID_LABELS = {
+    "FILE_OPS", "PROCESS_OPS", "CALENDAR_OPS", "SYSTEM_QUERY",
+    "DEV_OPTIMIZE", "DEV_EXPLAIN", "DEV_DEBUG",
+    "UNKNOWN",
+}
 
 FILE_OP_KEYWORDS = {
     "delete": "DELETE",
@@ -58,6 +62,9 @@ SYSTEM_PROMPT = (
     "PROCESS_OPS — killing, stopping, launching, managing processes or applications\n"
     "CALENDAR_OPS — scheduling, meetings, reminders, events, dates, times\n"
     "SYSTEM_QUERY — system info, CPU, RAM, battery, network, status queries\n"
+    "DEV_OPTIMIZE — optimize, improve, refactor, speed up code\n"
+    "DEV_EXPLAIN — explain, describe, summarize code\n"
+    "DEV_DEBUG — debug, fix, find error, solve bug in code\n"
     "UNKNOWN — anything else"
 )
 
@@ -117,9 +124,15 @@ _llm = _build_llm()
 
 def _keyword_route(text: str) -> str:
     lower = text.lower()
+    if any(k in lower for k in ("optimize", "refactor", "improve", "speed up")):
+        return "DEV_OPTIMIZE"
+    if any(k in lower for k in ("explain", "describe", "summarize", "what does")):
+        return "DEV_EXPLAIN"
+    if any(k in lower for k in ("debug", "fix", "error", "bug", "broken")):
+        return "DEV_DEBUG"
     if any(k in lower for k in ("file", "sort", "rename", "delete", "folder", "download", "document")):
         return "FILE_OPS"
-    if any(k in lower for k in ("kill", "stop", "process", "optimize", "terminate", "launch")):
+    if any(k in lower for k in ("kill", "stop", "process", "terminate", "launch")):
         return "PROCESS_OPS"
     if any(k in lower for k in ("schedule", "meeting", "calendar", "remind", "event", "appointment")):
         return "CALENDAR_OPS"
@@ -205,6 +218,12 @@ def _dispatch_file_ops(transcribed_text: str) -> None:
         print("[FileAgent] Specify exact file_path for deletion.")
 
 
+def _dispatch_dev_ops(intent_label: str) -> None:
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    from agents.orchestrator import Orchestrator
+    Orchestrator().run_dev_loop(intent_label)
+
+
 class IntentRouter:
     def __init__(self):
         self._llm = _llm
@@ -219,13 +238,10 @@ class IntentRouter:
         try:
             if self._llm_mode == "LLAMA_CPP" and self._llm is not None:
                 label = _route_llama_cpp(transcribed_text)
-
             elif self._llm_mode == "LANGCHAIN" and self._llm is not None:
                 label = _route_langchain(transcribed_text)
-
             else:
                 label = _keyword_route(transcribed_text)
-
         except Exception as e:
             print(f"[IntentRouter error] {e}", file=sys.stderr)
             label = _keyword_route(transcribed_text)
@@ -235,5 +251,7 @@ class IntentRouter:
 
         if label == "FILE_OPS":
             _dispatch_file_ops(transcribed_text)
+        elif label in ("DEV_OPTIMIZE", "DEV_EXPLAIN", "DEV_DEBUG"):
+            _dispatch_dev_ops(label)
 
         return label
