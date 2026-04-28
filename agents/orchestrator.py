@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+from typing import Callable
 
 import pyttsx3
 
@@ -57,14 +58,14 @@ _KB_PATH = os.path.normpath(
 )
 
 _FALLBACK_TOOLS = [
-    {"name": "create_folder",  "arguments": ["path"],                          "description": "Creates a new folder at the specified filesystem path"},
-    {"name": "delete_item",    "arguments": ["path"],                          "description": "Deletes a file or folder after user confirmation"},
-    {"name": "sort_directory", "arguments": ["path", "criteria"],              "description": "Moves directory files into categorized subfolders by type"},
-    {"name": "install_app",    "arguments": ["app_name"],                      "description": "Installs an application via winget or chocolatey package manager"},
-    {"name": "open_vscode",    "arguments": ["filepath"],                      "description": "Launches VS Code optionally opening a specified file or folder"},
-    {"name": "focus_editor",   "arguments": [],                                "description": "Brings the VS Code window to the foreground"},
-    {"name": "type_code",      "arguments": ["text"],                          "description": "Types text into the currently focused VS Code editor"},
-    {"name": "talk_back",      "arguments": ["message"],                       "description": "Asks user for clarification or provides feedback"},
+    {"name": "create_folder",   "arguments": ["path"],                         "description": "Creates a new folder at the specified filesystem path"},
+    {"name": "delete_item",     "arguments": ["path"],                         "description": "Deletes a file or folder after user confirmation"},
+    {"name": "sort_directory",  "arguments": ["path", "criteria"],             "description": "Moves directory files into categorized subfolders by type"},
+    {"name": "install_app",     "arguments": ["app_name"],                     "description": "Installs an application via winget or chocolatey package manager"},
+    {"name": "open_vscode",     "arguments": ["filepath"],                     "description": "Launches VS Code optionally opening a specified file or folder"},
+    {"name": "focus_editor",    "arguments": [],                               "description": "Brings the VS Code window to the foreground"},
+    {"name": "type_code",       "arguments": ["text"],                         "description": "Types text into the currently focused VS Code editor"},
+    {"name": "talk_back",       "arguments": ["message"],                      "description": "Asks user for clarification or provides feedback"},
     {"name": "upgrade_yourself","arguments": ["target_path", "code_snippet"],  "description": "Modifies Afro's codebase and triggers self-restart"},
 ]
 
@@ -148,7 +149,6 @@ _ARG_ORDER = {
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
-# Tracks the error type from the most recent _call_llm() invocation.
 _last_api_error: str | None = None
 
 
@@ -174,7 +174,6 @@ def _extract_json(raw: str) -> str:
 
 
 def _parse_steps(llm_output: str) -> list[dict]:
-    """Return list of validated {tool, args} dicts."""
     cleaned = _extract_json(llm_output)
     try:
         data = json.loads(cleaned)
@@ -305,7 +304,7 @@ class Orchestrator:
                         doc_parts.append(f"[{lib}]\n{result}")
                 except (ConnectionError, TimeoutError) as e:
                     print(f"[Orchestrator] Doc fetch connection error for {lib}: {e}", file=sys.stderr)
-                    _speak("API quota exceeded. Falling back to local keyword engine.")
+                    _speak("Cloud brain limited. Try a direct command.")
                 except Exception as e:
                     print(f"[Orchestrator] Doc fetch error for {lib}: {e}", file=sys.stderr)
             docs = "\n\n".join(doc_parts)
@@ -319,7 +318,7 @@ class Orchestrator:
         if not llm_response:
             error_type = _last_api_error or "CONNECTION"
             print(f"[Orchestrator] LLM returned no response. Error type: {error_type}")
-            _speak("API quota exceeded. Falling back to local keyword engine.")
+            _speak("Cloud brain limited. Try a direct command.")
             return
 
         set_clipboard_text(llm_response)
@@ -329,12 +328,26 @@ class Orchestrator:
         _speak(completion_msg)
         print(f"[Orchestrator] {completion_msg}.")
 
-    def run_director_loop(self, command_text: str, synth=None) -> list[str]:
+    def run_director_loop(
+        self,
+        command_text: str,
+        synth=None,
+        ui_log: Callable[[str], None] | None = None,
+    ) -> list[str]:
+
         def _say(text: str):
             if synth:
                 synth.speak(text)
             else:
                 _speak(text)
+
+        def _log(text: str):
+            print(f"[Director] {text}")
+            if ui_log:
+                try:
+                    ui_log(text)
+                except Exception:
+                    pass
 
         def _set_state(status: str, action: str = "—"):
             try:
@@ -343,6 +356,21 @@ class Orchestrator:
             except Exception:
                 pass
 
+        # ── FAST PATH — local router, zero API ───────────────────
+        try:
+            from agents.local_router import match_local_intent
+            local_result = match_local_intent(command_text)
+            if isinstance(local_result, dict) and local_result.get("status") == "HANDLED":
+                action  = local_result.get("action", "action")
+                details = local_result.get("details", {})
+                _log(f"[FAST-PATH] Executing {action}...")
+                _set_state("SUCCESS", f"FAST-PATH: {action}")
+                return [f"{action}({details})"]
+        except Exception as e:
+            _log(f"[FAST-PATH] LocalRouter error — falling through to LLM: {e}")
+
+        # ── FALLBACK PATH — LLM planning ──────────────────────────
+        _log("[FALLBACK] Consulting cloud reasoning...")
         _set_state("RUNNING", f"Planning: {command_text[:50]}")
         _say("Let me work on that.")
         print(f"[Director] Command: {command_text}")
@@ -354,8 +382,8 @@ class Orchestrator:
         if not raw:
             error_type = _last_api_error or "CONNECTION"
             _set_state("FAILED", f"{error_type}: LLM unavailable")
-            _say("API quota exceeded. Falling back to local keyword engine.")
-            print(f"[Director] LLM unavailable. Error type: {error_type}")
+            _say("Cloud brain limited. Try a direct command.")
+            _log(f"[FALLBACK] LLM unavailable. Error: {error_type}")
             return []
 
         print(f"[Director] Raw LLM response:\n{raw[:600]}")
@@ -364,6 +392,7 @@ class Orchestrator:
         if not steps:
             _set_state("FAILED", "No valid steps parsed")
             _say("I couldn't parse a valid action plan.")
+            _log("[FALLBACK] No valid steps parsed from LLM output.")
             return []
 
         print(f"[Director] Action plan ({len(steps)} step(s)):")
@@ -391,19 +420,19 @@ class Orchestrator:
             if tool == "talk_back":
                 msg = args.get("message", "Can you clarify your request?")
                 _say(msg)
-                print(f"[Director] talk_back: {msg}")
+                _log(f"[talk_back] {msg}")
                 _set_state("IDLE", "Awaiting clarification")
                 return []
 
             _set_state("RUNNING", step_label)
-            print(f"[Director] Executing: {step_label}")
+            _log(f"[FALLBACK] Executing step: {step_label}")
 
             method = method_map.get(tool)
             if method is None:
                 print(f"[Director] No dispatch method for tool: {tool!r}", file=sys.stderr)
                 continue
 
-            arg_order = _ARG_ORDER.get(tool, [])
+            arg_order  = _ARG_ORDER.get(tool, [])
             positional = [args[k] for k in arg_order if k in args]
             extra_kwargs = {k: v for k, v in args.items() if k not in arg_order}
 
@@ -420,8 +449,10 @@ class Orchestrator:
         if executed:
             _set_state("SUCCESS", f"Done: {len(executed)} step(s)")
             _say(f"Done. Completed {len(executed)} action{'s' if len(executed) != 1 else ''}.")
+            _log(f"[FALLBACK] Completed {len(executed)} step(s).")
         else:
             _set_state("FAILED", "All steps failed")
             _say("All steps failed. Check the console for details.")
+            _log("[FALLBACK] All steps failed.")
 
         return executed
