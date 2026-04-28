@@ -2,7 +2,6 @@ import os
 import sys
 
 from dotenv import load_dotenv
-from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, SystemMessage
 
 load_dotenv()
@@ -35,6 +34,49 @@ Rules:
 - CALENDAR_OPS: scheduling, meetings, reminders, events, dates, times
 - SYSTEM_QUERY: system info, CPU, RAM, battery, network, status queries
 - UNKNOWN: anything else"""
+
+_USE_LOCAL = not bool(os.getenv("OPENAI_API_KEY", "").strip())
+
+
+def _build_llm():
+    if _USE_LOCAL:
+        try:
+            from langchain_community.llms import LlamaCpp
+            model_path = os.getenv(
+                "LOCAL_MODEL_PATH",
+                os.path.expanduser("~/models/mistral-7b-instruct.Q4_K_M.gguf"),
+            )
+            print(f"[IntentRouter] Local mode — loading: {model_path}")
+            return LlamaCpp(
+                model_path=model_path,
+                temperature=0,
+                max_tokens=16,
+                n_ctx=512,
+                n_gpu_layers=20,
+                verbose=False,
+            )
+        except Exception as e:
+            print(f"[IntentRouter] Local LLM failed: {e}. Falling back to keyword routing.", file=sys.stderr)
+            return None
+    else:
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+
+
+_llm = _build_llm()
+
+
+def _keyword_route(text: str) -> str:
+    lower = text.lower()
+    if any(k in lower for k in ("file", "sort", "rename", "delete", "folder", "download", "document")):
+        return "FILE_OPS"
+    if any(k in lower for k in ("kill", "stop", "process", "optimize", "terminate", "launch")):
+        return "PROCESS_OPS"
+    if any(k in lower for k in ("schedule", "meeting", "calendar", "remind", "event", "appointment")):
+        return "CALENDAR_OPS"
+    if any(k in lower for k in ("cpu", "ram", "memory", "battery", "network", "status", "usage")):
+        return "SYSTEM_QUERY"
+    return "UNKNOWN"
 
 
 def _extract_operation(text: str) -> str:
@@ -90,31 +132,38 @@ def _dispatch_file_ops(transcribed_text: str) -> None:
 
 class IntentRouter:
     def __init__(self):
-        self._llm = ChatOpenAI(
-            model="gpt-3.5-turbo",
-            temperature=0,
-        )
+        self._llm = _llm
 
     def route(self, transcribed_text: str) -> str:
         if not transcribed_text or not transcribed_text.strip():
             return "UNKNOWN"
 
-        try:
-            messages = [
-                SystemMessage(content=SYSTEM_PROMPT),
-                HumanMessage(content=transcribed_text.strip()),
-            ]
-            response = self._llm.invoke(messages)
-            label = response.content.strip().upper()
+        label = "UNKNOWN"
 
-            if label not in VALID_LABELS:
-                return "UNKNOWN"
+        if self._llm is None:
+            label = _keyword_route(transcribed_text)
+        else:
+            try:
+                if _USE_LOCAL:
+                    prompt = f"{SYSTEM_PROMPT}\n\nUser: {transcribed_text.strip()}\nLabel:"
+                    raw = self._llm.invoke(prompt)
+                    label = (raw.strip() if isinstance(raw, str) else raw.content.strip()).upper().split()[0]
+                else:
+                    messages = [
+                        SystemMessage(content=SYSTEM_PROMPT),
+                        HumanMessage(content=transcribed_text.strip()),
+                    ]
+                    response = self._llm.invoke(messages)
+                    label = response.content.strip().upper()
 
-            if label == "FILE_OPS":
-                _dispatch_file_ops(transcribed_text)
+                if label not in VALID_LABELS:
+                    label = _keyword_route(transcribed_text)
 
-            return label
+            except Exception as e:
+                print(f"[IntentRouter error] {e}", file=sys.stderr)
+                label = _keyword_route(transcribed_text)
 
-        except Exception as e:
-            print(f"[IntentRouter error] {e}", file=sys.stderr)
-            return "UNKNOWN"
+        if label == "FILE_OPS":
+            _dispatch_file_ops(transcribed_text)
+
+        return label
