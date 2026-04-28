@@ -20,7 +20,7 @@ from voice.transcribe import process_speech
 from voice.synthesizer import VoiceSynthesizer
 from core.intent_router import IntentRouter
 from core.system_tray import start_tray
-from core.dashboard import start_dashboard, log_brain, socketio
+from core.dashboard import start_dashboard, log_brain, socketio, set_exec_state
 from core.memory import log_command, update_output, update_feedback, remember
 from core.watcher import Watcher
 from core.hud import start_hud, stop_hud
@@ -28,6 +28,8 @@ from agents.process_agent import ProcessAgent, stop_deep_focus
 from agents.dev_agent import DevAgent
 from agents.meta_agent import start_meta_agent, run_review_on_command
 from agents.scheduler_agent import SchedulerAgent
+from agents.orchestrator import Orchestrator
+from agents.os_agent import OSAgent
 
 SAMPLE_RATE = 16000
 CAPTURE_SECONDS = 5
@@ -229,6 +231,51 @@ def _handle_remember(transcribed_text: str) -> None:
         log_brain(f"Already remembered: {content[:80]}")
 
 
+_OS_TRIGGER_KEYWORDS = (
+    "sort my", "sort the", "organise", "organize",
+    "create folder", "make folder", "make a folder",
+    "install ", "upgrade yourself",
+    "open vs code", "open vscode", "open visual studio",
+    "clean up my", "clean my downloads",
+)
+
+
+def _handle_os_ops(transcribed_text: str, row_id: int) -> None:
+    lower = transcribed_text.lower()
+
+    # "upgrade yourself" — open VS Code + speak intent
+    if "upgrade yourself" in lower:
+        agent = OSAgent()
+        _synth.speak("Opening VS Code to apply upgrades.")
+        log_brain("Upgrade self triggered.")
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        agent.open_vscode(project_root)
+        update_output(row_id, "VS Code opened for self-upgrade")
+        update_feedback(row_id, True)
+        set_exec_state("SUCCESS", "VS Code opened")
+        return
+
+    # "open vs code / vscode" — direct open, no director needed
+    if any(k in lower for k in ("open vs code", "open vscode", "open visual studio")):
+        agent = OSAgent()
+        _synth.speak("Opening VS Code.")
+        agent.open_vscode()
+        update_output(row_id, "VS Code opened")
+        update_feedback(row_id, True)
+        set_exec_state("SUCCESS", "VS Code opened")
+        return
+
+    # All other OS ops — route through the director loop
+    def _run():
+        orch = Orchestrator()
+        executed = orch.run_director_loop(transcribed_text, synth=_synth)
+        update_output(row_id, "; ".join(executed) if executed else "no steps executed")
+        update_feedback(row_id, bool(executed))
+        log_brain(f"OS_OPS director complete: {len(executed)} step(s)")
+
+    threading.Thread(target=_run, daemon=True, name="AfroDirector").start()
+
+
 def _activate_deep_focus() -> None:
     global deep_focus_active, _focus_agent, _focus_thread
     if deep_focus_active:
@@ -315,6 +362,14 @@ def on_wake_word_detected() -> None:
             ),
             daemon=True,
         ).start()
+        return
+
+    # ── OS agent commands (pre-routing) ──────────────────────────
+    if any(k in lower for k in _OS_TRIGGER_KEYWORDS):
+        row_id = log_command(transcribed_text, "OS_OPS")
+        set_exec_state("RUNNING", transcribed_text[:60])
+        log_brain(f"OS_OPS: {transcribed_text[:80]}")
+        _handle_os_ops(transcribed_text, row_id)
         return
 
     # ── focus mode commands (pre-routing) ────────────────────────
