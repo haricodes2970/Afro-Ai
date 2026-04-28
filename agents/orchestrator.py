@@ -1,4 +1,5 @@
 import ast
+import json
 import os
 import re
 import sys
@@ -46,59 +47,110 @@ STDLIB_SKIP = {
     "argparse", "asyncio", "warnings", "weakref", "tempfile",
 }
 
-DIRECTOR_PROMPT = (
-    "Convert this voice command into a list of Python-style function calls.\n"
-    "Use ONLY these allowed functions:\n"
-    "  sort_directory(path, criteria)\n"
-    "  create_folder(path)\n"
-    "  delete_item(path)\n"
-    "  install_app(app_name)\n"
-    "  open_vscode(filepath='')\n"
-    "  type_code(text)\n\n"
-    "Rules:\n"
-    "- Return ONLY function calls, one per line\n"
-    "- Use real paths when mentioned, default to common Windows paths otherwise\n"
-    "- NO explanations, NO import statements, NO markdown\n\n"
-    "Command: {command}\n"
-    "Function calls:"
-)
+_USERNAME = os.environ.get("USERNAME", os.environ.get("USER", "User"))
+_HOME     = os.path.expanduser("~").replace("\\", "/")
 
-# Safe dispatcher: maps function names → OSAgent method calls
-_ALLOWED_CALLS = {
+DIRECTOR_PROMPT = """\
+[ROLE]
+You are the Director Agent for Afro, a Windows OS Automator.
+Convert natural language voice commands into structured, executable actions.
+
+[AVAILABLE TOOLS]
+1. create_folder(path)
+2. delete_item(path)
+3. sort_directory(path, criteria)
+4. install_app(app_name)
+5. open_vscode(filepath)
+6. type_code(text)
+7. talk_back(message)
+
+[STRICT RULES]
+- OUTPUT ONLY VALID JSON — no markdown, no explanations, no code fences
+- Always return a JSON ARRAY (even for a single action)
+- Each item must have "tool" and "args" keys
+- NEVER hallucinate tools or parameters
+- Use safe Windows paths; default home directory: {home}
+
+[SAFETY]
+- For destructive actions (delete_item): only include if user explicitly asked
+- If the command is ambiguous or missing details, use talk_back to ask for clarification
+
+[FORMAT]
+[
+  {{
+    "tool": "<tool_name>",
+    "args": {{ "<param>": "<value>" }}
+  }}
+]
+
+[INPUT]
+User Command: {command}
+
+[OUTPUT]
+"""
+
+# Allowed tools — talk_back is handled before OSAgent dispatch
+_ALLOWED_TOOLS = {
     "sort_directory",
     "create_folder",
     "delete_item",
     "install_app",
     "open_vscode",
     "type_code",
+    "talk_back",
 }
 
-_STEP_RE = re.compile(r"^(\w+)\((.*)\)$", re.DOTALL)
+# Arg key → positional order for each OSAgent method
+_ARG_ORDER = {
+    "sort_directory": ["path", "criteria"],
+    "create_folder":  ["path"],
+    "delete_item":    ["path"],
+    "install_app":    ["app_name"],
+    "open_vscode":    ["filepath"],
+    "type_code":      ["text"],
+}
+
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
 
-def _parse_steps(llm_output: str) -> list[tuple[str, list]]:
-    steps = []
-    for raw_line in llm_output.splitlines():
-        line = raw_line.strip().strip("`").strip()
-        if not line or line.startswith("#"):
+def _extract_json(raw: str) -> str:
+    # Strip markdown code fences if present
+    m = _JSON_FENCE_RE.search(raw)
+    if m:
+        return m.group(1).strip()
+    # Find first '[' and last ']'
+    start = raw.find("[")
+    end   = raw.rfind("]")
+    if start != -1 and end != -1:
+        return raw[start:end + 1]
+    return raw.strip()
+
+
+def _parse_steps(llm_output: str) -> list[dict]:
+    """Return list of validated {tool, args} dicts."""
+    cleaned = _extract_json(llm_output)
+    try:
+        data = json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        print(f"[Director] JSON parse error: {e}\nRaw output:\n{llm_output[:400]}")
+        return []
+
+    if not isinstance(data, list):
+        print("[Director] LLM output is not a JSON array.")
+        return []
+
+    steps: list[dict] = []
+    for item in data:
+        if not isinstance(item, dict):
             continue
-        m = _STEP_RE.match(line)
-        if not m:
+        tool = item.get("tool", "").strip()
+        args = item.get("args", {})
+        if tool not in _ALLOWED_TOOLS:
+            print(f"[Director] Blocked disallowed tool: {tool!r}")
             continue
-        fn_name = m.group(1)
-        if fn_name not in _ALLOWED_CALLS:
-            print(f"[Orchestrator] Blocked disallowed call: {fn_name}")
-            continue
-        raw_args = m.group(2).strip()
-        try:
-            args = list(ast.literal_eval(f"({raw_args},)")) if raw_args else []
-        except Exception:
-            # Try wrapping bare string
-            try:
-                args = [ast.literal_eval(raw_args)]
-            except Exception:
-                args = [raw_args] if raw_args else []
-        steps.append((fn_name, args))
+        if not isinstance(args, dict):
+            args = {}
+        steps.append({"tool": tool, "args": args})
     return steps
 
 
@@ -230,9 +282,8 @@ class Orchestrator:
         _say("Let me work on that.")
         print(f"[Director] Command: {command_text}")
 
-        # Build director prompt and call Gemini Flash
-        prompt = DIRECTOR_PROMPT.format(command=command_text)
-        print("[Director] Consulting Gemini Flash for action plan...")
+        prompt = DIRECTOR_PROMPT.format(command=command_text, home=_HOME)
+        print("[Director] Consulting LLM for JSON action plan...")
         raw = _call_llm(prompt)
 
         if not raw:
@@ -240,19 +291,21 @@ class Orchestrator:
             _say("I couldn't generate a plan. LLM is unavailable.")
             return []
 
+        print(f"[Director] Raw LLM response:\n{raw[:600]}")
         steps = _parse_steps(raw)
+
         if not steps:
             _set_state("FAILED", "No valid steps parsed")
-            print(f"[Director] Could not parse steps from:\n{raw}")
             _say("I couldn't parse a valid action plan.")
             return []
 
         print(f"[Director] Action plan ({len(steps)} step(s)):")
-        for i, (fn, args) in enumerate(steps, 1):
-            print(f"  {i}. {fn}({', '.join(repr(a) for a in args)})")
+        for i, s in enumerate(steps, 1):
+            print(f"  {i}. {s['tool']} {s['args']}")
 
         agent = OSAgent()
         executed: list[str] = []
+
         method_map = {
             "sort_directory": agent.sort_directory,
             "create_folder":  agent.create_folder,
@@ -262,23 +315,42 @@ class Orchestrator:
             "type_code":      agent.type_code,
         }
 
-        for fn_name, args in steps:
-            step_label = f"{fn_name}({', '.join(repr(a) for a in args)})"
+        for step in steps:
+            tool = step["tool"]
+            args = step["args"]
+            step_label = f"{tool}({args})"
+
+            # talk_back — speak clarification and stop planning
+            if tool == "talk_back":
+                msg = args.get("message", "Can you clarify your request?")
+                _say(msg)
+                print(f"[Director] talk_back: {msg}")
+                _set_state("IDLE", "Awaiting clarification")
+                return []
+
             _set_state("RUNNING", step_label)
             print(f"[Director] Executing: {step_label}")
 
+            method = method_map.get(tool)
+            if method is None:
+                print(f"[Director] No method for tool: {tool}", file=sys.stderr)
+                continue
+
+            # Convert args dict → positional args in declared order
+            arg_order = _ARG_ORDER.get(tool, [])
+            positional = [args[k] for k in arg_order if k in args]
+            # Any extra keys not in order become keyword args
+            extra_kwargs = {k: v for k, v in args.items() if k not in arg_order}
+
             try:
-                method = method_map[fn_name]
-                method(*args)
+                method(*positional, **extra_kwargs)
                 executed.append(step_label)
             except TypeError as e:
-                print(f"[Director] Bad args for {fn_name}: {e}", file=sys.stderr)
+                print(f"[Director] Bad args for {tool}: {e}", file=sys.stderr)
                 _set_state("FAILED", step_label)
-                continue
             except Exception as e:
-                print(f"[Director] Step failed — {fn_name}: {e}", file=sys.stderr)
+                print(f"[Director] Step failed — {tool}: {e}", file=sys.stderr)
                 _set_state("FAILED", step_label)
-                continue
 
         if executed:
             _set_state("SUCCESS", f"Done: {len(executed)} step(s)")
