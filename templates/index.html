@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Afro — System Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+</head>
+<body>
+  <div class="bg-overlay"></div>
+
+  <header>
+    <div class="logo">⬡ AFRO</div>
+    <div class="status-dot" id="statusDot"></div>
+    <span class="status-label" id="statusLabel">Connecting...</span>
+  </header>
+
+  <main class="grid">
+
+    <!-- CPU -->
+    <div class="card gauge-card">
+      <h3>CPU</h3>
+      <div class="gauge-ring" id="cpuRing">
+        <svg viewBox="0 0 120 120">
+          <circle class="track" cx="60" cy="60" r="50"/>
+          <circle class="fill" id="cpuArc" cx="60" cy="60" r="50"
+                  stroke-dasharray="0 314"/>
+        </svg>
+        <div class="gauge-value" id="cpuVal">0%</div>
+      </div>
+    </div>
+
+    <!-- RAM -->
+    <div class="card gauge-card">
+      <h3>RAM</h3>
+      <div class="gauge-ring" id="ramRing">
+        <svg viewBox="0 0 120 120">
+          <circle class="track" cx="60" cy="60" r="50"/>
+          <circle class="fill" id="ramArc" cx="60" cy="60" r="50"
+                  stroke-dasharray="0 314"/>
+        </svg>
+        <div class="gauge-value" id="ramVal">0%</div>
+      </div>
+    </div>
+
+    <!-- GPU -->
+    <div class="card gauge-card">
+      <h3>GPU VRAM</h3>
+      <div class="gauge-ring" id="gpuRing">
+        <svg viewBox="0 0 120 120">
+          <circle class="track" cx="60" cy="60" r="50"/>
+          <circle class="fill gpu" id="gpuArc" cx="60" cy="60" r="50"
+                  stroke-dasharray="0 314"/>
+        </svg>
+        <div class="gauge-value" id="gpuVal">0%</div>
+      </div>
+    </div>
+
+    <!-- Brain Feed -->
+    <div class="card feed-card">
+      <h3>⟳ Brain Feed</h3>
+      <ul id="brainFeed"></ul>
+    </div>
+
+    <!-- Clipboard Preview -->
+    <div class="card clip-card">
+      <h3>⎘ Clipboard</h3>
+      <pre id="clipPreview"></pre>
+    </div>
+
+  </main>
+
+  <script>
+    const socket = io();
+
+    socket.on("connect", () => {
+      document.getElementById("statusDot").classList.add("online");
+      document.getElementById("statusLabel").textContent = "Live";
+    });
+
+    socket.on("disconnect", () => {
+      document.getElementById("statusDot").classList.remove("online");
+      document.getElementById("statusLabel").textContent = "Disconnected";
+    });
+
+    function setArc(arcId, valId, pct) {
+      const circ = 314;
+      const used = (pct / 100) * circ;
+      document.getElementById(arcId).setAttribute(
+        "stroke-dasharray", `${used} ${circ - used}`
+      );
+      document.getElementById(valId).textContent = pct.toFixed(1) + "%";
+    }
+
+    socket.on("telemetry", (data) => {
+      setArc("cpuArc", "cpuVal", data.cpu);
+      setArc("ramArc", "ramVal", data.ram);
+      setArc("gpuArc", "gpuVal", data.gpu);
+
+      const feed = document.getElementById("brainFeed");
+      feed.innerHTML = "";
+      (data.brain_feed || []).slice().reverse().forEach(msg => {
+        const li = document.createElement("li");
+        li.textContent = msg;
+        feed.appendChild(li);
+      });
+
+      const clip = document.getElementById("clipPreview");
+      clip.textContent = data.clipboard_preview || "—";
+    });
+  </script>
+</body>
+</html>
