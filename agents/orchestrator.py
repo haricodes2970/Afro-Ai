@@ -112,13 +112,25 @@ _ARG_ORDER = {
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
+# Tracks the error type from the most recent _call_llm() invocation.
+# Values: "API_QUOTA" | "CONNECTION" | None
+_last_api_error: str | None = None
+
+
+def _classify_api_error(e: Exception) -> str:
+    err  = str(e).lower()
+    code = getattr(e, "status_code", None) or getattr(e, "code", None)
+    if code == 429 or "429" in err or "quota" in err or ("rate" in err and "limit" in err):
+        return "API_QUOTA"
+    if isinstance(e, (ConnectionError, TimeoutError)) or "connection" in err or "timeout" in err:
+        return "CONNECTION"
+    return "CONNECTION"
+
 
 def _extract_json(raw: str) -> str:
-    # Strip markdown code fences if present
     m = _JSON_FENCE_RE.search(raw)
     if m:
         return m.group(1).strip()
-    # Find first '[' and last ']'
     start = raw.find("[")
     end   = raw.rfind("]")
     if start != -1 and end != -1:
@@ -174,7 +186,10 @@ def _extract_libraries(code: str) -> list[str]:
 
 
 def _call_llm(prompt: str) -> str:
-    # Priority 1: llama_cpp
+    global _last_api_error
+    _last_api_error = None
+
+    # Priority 1: llama_cpp (local — no quota issues)
     try:
         from llama_cpp import Llama
         model_path = os.getenv("LOCAL_MODEL_PATH", os.path.join("models", "llama.gguf"))
@@ -196,8 +211,12 @@ def _call_llm(prompt: str) -> str:
                 messages=[{"role": "user", "content": prompt}],
             )
             return message.content[0].text.strip()
-    except Exception:
-        pass
+    except (ConnectionError, TimeoutError) as e:
+        _last_api_error = "CONNECTION"
+        print(f"[Orchestrator] Anthropic connection error: {e}", file=sys.stderr)
+    except Exception as e:
+        _last_api_error = _classify_api_error(e)
+        print(f"[Orchestrator] Anthropic error ({_last_api_error}): {e}", file=sys.stderr)
 
     # Priority 3: Gemini Flash (Director default)
     try:
@@ -208,8 +227,12 @@ def _call_llm(prompt: str) -> str:
             model = genai.GenerativeModel("gemini-1.5-flash")
             response = model.generate_content(prompt)
             return response.text.strip()
-    except Exception:
-        pass
+    except (ConnectionError, TimeoutError) as e:
+        _last_api_error = "CONNECTION"
+        print(f"[Orchestrator] Gemini connection error: {e}", file=sys.stderr)
+    except Exception as e:
+        _last_api_error = _classify_api_error(e)
+        print(f"[Orchestrator] Gemini error ({_last_api_error}): {e}", file=sys.stderr)
 
     return ""
 
@@ -241,9 +264,15 @@ class Orchestrator:
             print(f"[Orchestrator] Fetching docs for: {libs}")
             doc_parts = []
             for lib in libs:
-                result = fetch_docs(lib)
-                if result:
-                    doc_parts.append(f"[{lib}]\n{result}")
+                try:
+                    result = fetch_docs(lib)
+                    if result:
+                        doc_parts.append(f"[{lib}]\n{result}")
+                except (ConnectionError, TimeoutError) as e:
+                    print(f"[Orchestrator] Doc fetch connection error for {lib}: {e}", file=sys.stderr)
+                    _speak("API quota exceeded. Falling back to local keyword engine.")
+                except Exception as e:
+                    print(f"[Orchestrator] Doc fetch error for {lib}: {e}", file=sys.stderr)
             docs = "\n\n".join(doc_parts)
 
         prompt = _build_prompt(intent_label, code, docs)
@@ -253,8 +282,9 @@ class Orchestrator:
         llm_response = _call_llm(prompt)
 
         if not llm_response:
-            print("[Orchestrator] LLM returned no response.")
-            _speak("No response from AI model.")
+            error_type = _last_api_error or "CONNECTION"
+            print(f"[Orchestrator] LLM returned no response. Error type: {error_type}")
+            _speak("API quota exceeded. Falling back to local keyword engine.")
             return
 
         set_clipboard_text(llm_response)
@@ -287,8 +317,10 @@ class Orchestrator:
         raw = _call_llm(prompt)
 
         if not raw:
-            _set_state("FAILED", "LLM unavailable")
-            _say("I couldn't generate a plan. LLM is unavailable.")
+            error_type = _last_api_error or "CONNECTION"
+            _set_state("FAILED", f"{error_type}: LLM unavailable")
+            _say("API quota exceeded. Falling back to local keyword engine.")
+            print(f"[Director] LLM unavailable. Error type: {error_type}")
             return []
 
         print(f"[Director] Raw LLM response:\n{raw[:600]}")
@@ -320,7 +352,6 @@ class Orchestrator:
             args = step["args"]
             step_label = f"{tool}({args})"
 
-            # talk_back — speak clarification and stop planning
             if tool == "talk_back":
                 msg = args.get("message", "Can you clarify your request?")
                 _say(msg)
@@ -336,10 +367,8 @@ class Orchestrator:
                 print(f"[Director] No method for tool: {tool}", file=sys.stderr)
                 continue
 
-            # Convert args dict → positional args in declared order
             arg_order = _ARG_ORDER.get(tool, [])
             positional = [args[k] for k in arg_order if k in args]
-            # Any extra keys not in order become keyword args
             extra_kwargs = {k: v for k, v in args.items() if k not in arg_order}
 
             try:
