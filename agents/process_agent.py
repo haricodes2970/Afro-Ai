@@ -1,6 +1,10 @@
+import sys
+import time
+import threading
+
 import psutil
 
-PROTECTED = {"system", "idle", "wininit", "csrss"}
+PROTECTED = {"system", "idle", "wininit", "csrss", "smss", "lsass", "services", "svchost"}
 
 BLOATWARE = [
     "360safe",
@@ -9,6 +13,26 @@ BLOATWARE = [
     "Teams",
     "XboxAppServices",
 ]
+
+BLACKLIST = [
+    "discord",
+    "steam",
+    "chrome",
+    "spotify",
+    "msedge",
+    "opera",
+]
+
+_focus_event   = threading.Event()
+_killed_session: list[str] = []
+
+
+def stop_deep_focus() -> None:
+    _focus_event.clear()
+
+
+def get_killed_session() -> list[str]:
+    return list(_killed_session)
 
 
 class ProcessAgent:
@@ -127,3 +151,59 @@ class ProcessAgent:
             print("[ProcessAgent] No bloatware processes found running.")
 
         return total_freed_mb
+
+    def enforce_deep_focus(self) -> None:
+        global _killed_session
+        _focus_event.set()
+        _killed_session.clear()
+        print("[ProcessAgent] Deep Focus enforcement started.")
+
+        while _focus_event.is_set():
+            try:
+                for proc in psutil.process_iter(["pid", "name"]):
+                    if not _focus_event.is_set():
+                        break
+                    try:
+                        name = proc.info["name"] or ""
+                        name_lower = name.lower().replace(".exe", "")
+
+                        if name_lower in PROTECTED:
+                            continue
+
+                        for blocked in BLACKLIST:
+                            if blocked in name_lower:
+                                try:
+                                    proc.terminate()
+                                    proc.wait(timeout=3)
+                                except psutil.TimeoutExpired:
+                                    proc.kill()
+                                except psutil.AccessDenied:
+                                    print(
+                                        f"[DeepFocus] Access denied: {name}",
+                                        file=sys.stderr,
+                                    )
+                                    break
+
+                                _killed_session.append(name)
+                                print(f"[DeepFocus] Terminated distraction: {name}")
+
+                                try:
+                                    from core.hud import notify_killed
+                                    notify_killed(name)
+                                except Exception:
+                                    pass
+                                break
+
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        continue
+
+            except Exception as e:
+                print(f"[DeepFocus] Scan error: {e}", file=sys.stderr)
+
+            # sleep in short intervals so stop signal is responsive
+            for _ in range(30):
+                if not _focus_event.is_set():
+                    break
+                time.sleep(1)
+
+        print("[ProcessAgent] Deep Focus enforcement stopped.")
