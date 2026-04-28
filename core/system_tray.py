@@ -1,8 +1,11 @@
 import threading
 import sys
+import webbrowser
 
 import pystray
 from PIL import Image, ImageDraw
+
+DASHBOARD_URL = "http://127.0.0.1:5000"
 
 
 def _create_icon_image(size: int = 64) -> Image.Image:
@@ -17,6 +20,10 @@ def _on_status(icon, item) -> None:
     print("[Afro] System active and listening.")
 
 
+def _on_dashboard(icon, item) -> None:
+    webbrowser.open(DASHBOARD_URL)
+
+
 def _on_exit(icon, item) -> None:
     print("[Afro] Shutting down system tray...")
     icon.stop()
@@ -28,6 +35,7 @@ def _run_tray() -> None:
         icon_image = _create_icon_image()
         menu = pystray.Menu(
             pystray.MenuItem("Status", _on_status),
+            pystray.MenuItem("Show Dashboard", _on_dashboard),
             pystray.MenuItem("Exit", _on_exit),
         )
         icon = pystray.Icon(
