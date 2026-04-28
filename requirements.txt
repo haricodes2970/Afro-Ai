@@ -1,5 +1,5 @@
 # --- PHASE 1: VOICE FOUNDATION ---
-pvporcupine>=3.0.0
+openwakeword
 faster-whisper
 pyaudio
 pyttsx3
