@@ -2,110 +2,215 @@ import os
 import re
 import sys
 import subprocess
+import difflib
+
+# ── App alias map ─────────────────────────────────────────────────────────────
+APP_ALIASES: dict[str, list[str]] = {
+    "chrome":    ["chrome", "google chrome"],
+    "brave":     ["brave", "braille", "brav", "brave browser"],
+    "vscode":    ["code", "vs code", "visual studio code", "vscode"],
+    "notepad":   ["notepad"],
+    "explorer":  ["file explorer", "explorer"],
+    "firefox":   ["firefox", "mozilla firefox", "fire fox"],
+    "spotify":   ["spotify"],
+    "discord":   ["discord"],
+    "terminal":  ["terminal", "cmd", "command prompt", "powershell"],
+    "calculator":["calculator", "calc"],
+    "paint":     ["paint", "mspaint"],
+}
+
+# Canonical executable / startfile target for each alias key
+_APP_TARGETS: dict[str, str] = {
+    "chrome":    "chrome",
+    "brave":     "brave",
+    "vscode":    "code",
+    "notepad":   "notepad",
+    "explorer":  "explorer",
+    "firefox":   "firefox",
+    "spotify":   "spotify",
+    "discord":   "discord",
+    "terminal":  "cmd",
+    "calculator":"calc",
+    "paint":     "mspaint",
+}
+
+# Flat list of all known aliases (used for difflib matching)
+_ALL_ALIASES: list[str] = [alias for aliases in APP_ALIASES.values() for alias in aliases]
+
+# Reverse map: alias string → canonical key
+_ALIAS_TO_KEY: dict[str, str] = {
+    alias: key
+    for key, aliases in APP_ALIASES.items()
+    for alias in aliases
+}
+
+# Characters that must not appear in user-supplied paths or app names
+_UNSAFE = re.compile(r"[;&|`$<>\"\'\\]")
+
+# ── Compiled patterns ─────────────────────────────────────────────────────────
+_RE_OPEN   = re.compile(r"^\s*(open|launch|start)\s+(.+)$",        re.IGNORECASE)
+_RE_FOLDER = re.compile(r"^\s*(create|make)\s+(folder|directory)\s+(.+)$", re.IGNORECASE)
+_RE_EXIT   = re.compile(r"^\s*(exit|quit|stop|goodbye)\s*$",        re.IGNORECASE)
 
 _HOME = os.path.expanduser("~")
 
-# ── Compiled patterns ─────────────────────────────────────────────────────────
-_RE_OPEN   = re.compile(r"^open\s+(.+)$",           re.IGNORECASE)
-_RE_FOLDER = re.compile(r"^create\s+folder\s+(.+)$", re.IGNORECASE)
-_RE_EXIT   = re.compile(r"^(stop|goodbye|exit|quit|bye)$", re.IGNORECASE)
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-# Characters that must not appear in folder names or app names passed to shell
-_UNSAFE = re.compile(r"[;&|`$<>\"\'\\]")
+def _normalize(text: str) -> str:
+    return re.sub(r"\s+", " ", text.strip().lower())
 
 
 def _sanitize(value: str) -> str:
-    """Strip whitespace and reject shell-injection characters."""
     value = value.strip()
     if _UNSAFE.search(value):
-        raise ValueError(f"Unsafe characters in input: {value!r}")
+        raise ValueError(f"Unsafe characters in value: {value!r}")
     return value
 
 
-def _handle_open(app_name: str) -> bool:
+def _resolve_app(raw_name: str) -> str | None:
+    """
+    Map a raw app name to a canonical executable target.
+    Uses exact alias match first, then difflib fuzzy match.
+    Returns None if no confident match found.
+    """
+    needle = _normalize(raw_name)
+
+    # Exact match in alias table
+    if needle in _ALIAS_TO_KEY:
+        key = _ALIAS_TO_KEY[needle]
+        return _APP_TARGETS[key]
+
+    # Fuzzy match against all known aliases
+    matches = difflib.get_close_matches(needle, _ALL_ALIASES, n=1, cutoff=0.72)
+    if matches:
+        key = _ALIAS_TO_KEY[matches[0]]
+        return _APP_TARGETS[key]
+
+    # No confident match — return the sanitized raw name as-is (best effort)
+    return needle if needle else None
+
+# ── Handlers ──────────────────────────────────────────────────────────────────
+
+def _handle_open(raw_name: str) -> dict | str:
     try:
-        app_name = _sanitize(app_name)
-        if not app_name:
-            return False
-        print(f"Local execution: open {app_name!r}")
-        subprocess.Popen(
-            [app_name],
-            shell=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return True
+        raw_name       = _sanitize(raw_name)
+        normalized_app = _resolve_app(raw_name)
+        if not normalized_app:
+            return "FALLBACK"
+
+        print(f"Local execution: open {normalized_app!r}")
+
+        launched = False
+
+        # Primary: os.startfile (Windows)
+        if sys.platform == "win32":
+            try:
+                os.startfile(normalized_app)
+                launched = True
+            except (OSError, FileNotFoundError):
+                pass
+
+        # Fallback: subprocess.Popen
+        if not launched:
+            try:
+                subprocess.Popen(
+                    [normalized_app],
+                    shell=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                launched = True
+            except FileNotFoundError:
+                pass
+
+        if not launched:
+            print(f"[LocalRouter] '{normalized_app}' not found — falling back to API router.")
+            return "FALLBACK"
+
+        return {
+            "status":  "HANDLED",
+            "action":  "open_app",
+            "details": {"app": normalized_app},
+        }
+
     except ValueError as e:
         print(f"[LocalRouter] Rejected unsafe app name: {e}")
-        return False
-    except FileNotFoundError:
-        # app not on PATH — let API router handle it
-        print(f"[LocalRouter] '{app_name}' not found on PATH; falling back.")
-        return False
+        return "FALLBACK"
     except Exception as e:
         print(f"[LocalRouter] open error: {e}")
-        return False
+        return "FALLBACK"
 
 
-def _handle_create_folder(folder_name: str) -> bool:
+def _handle_create_folder(raw_name: str) -> dict | str:
     try:
-        folder_name = _sanitize(folder_name)
-        if not folder_name:
-            return False
+        raw_name = _sanitize(raw_name)
+        if not raw_name:
+            return "FALLBACK"
 
-        # Resolve relative to home; block absolute paths injected by user
-        if os.path.isabs(folder_name):
-            print("[LocalRouter] Absolute paths not accepted; using home-relative name.")
-            folder_name = os.path.basename(folder_name)
+        # Reject absolute paths and traversal attempts
+        if os.path.isabs(raw_name) or ".." in raw_name:
+            print(f"[LocalRouter] Rejected path: {raw_name!r}")
+            raw_name = os.path.basename(raw_name)
 
-        path = os.path.normpath(os.path.join(_HOME, folder_name))
+        path = os.path.normpath(os.path.join(_HOME, raw_name))
 
-        # Confirm the resolved path is still inside home
         if not path.startswith(os.path.normpath(_HOME)):
             print(f"[LocalRouter] Path escapes home directory: {path!r}")
-            return False
+            return "FALLBACK"
 
         os.makedirs(path, exist_ok=True)
         print(f"Local execution: create folder {path!r}")
-        return True
+
+        return {
+            "status":  "HANDLED",
+            "action":  "create_folder",
+            "details": {"path": path},
+        }
+
     except ValueError as e:
         print(f"[LocalRouter] Rejected unsafe folder name: {e}")
-        return False
+        return "FALLBACK"
     except OSError as e:
         print(f"[LocalRouter] Folder creation error: {e}")
-        return False
+        return "FALLBACK"
     except Exception as e:
         print(f"[LocalRouter] create_folder error: {e}")
-        return False
+        return "FALLBACK"
 
 
-def _handle_exit() -> bool:
+def _handle_exit() -> dict:
     print("Shutting down Afro")
+    result: dict = {"status": "HANDLED", "action": "exit", "details": {}}
     sys.exit(0)
+    return result  # unreachable — satisfies type checker
 
 
-def match_local_intent(command_text: str) -> bool:
+# ── Public interface ──────────────────────────────────────────────────────────
+
+def match_local_intent(text: str) -> dict | str:
     """
-    Attempt to handle command_text locally without any API call.
+    Attempt to handle `text` locally without any API call.
 
-    Returns True  — command was handled locally.
-    Returns False — no local match; caller should forward to API router.
+    Returns:
+        dict  {"status": "HANDLED", "action": "<name>", "details": {...}}
+        OR
+        str   "FALLBACK"  — caller should forward to LLM router
     """
-    if not command_text or not isinstance(command_text, str):
-        return False
+    if not text or not isinstance(text, str):
+        return "FALLBACK"
 
-    text = command_text.strip()
+    normalized = _normalize(text)
 
-    m = _RE_EXIT.match(text)
+    m = _RE_EXIT.match(normalized)
     if m:
         return _handle_exit()
 
-    m = _RE_OPEN.match(text)
+    m = _RE_OPEN.match(normalized)
     if m:
-        return _handle_open(m.group(1))
+        return _handle_open(m.group(2))
 
-    m = _RE_FOLDER.match(text)
+    m = _RE_FOLDER.match(normalized)
     if m:
-        return _handle_create_folder(m.group(1))
+        return _handle_create_folder(m.group(3))
 
-    return False
+    return "FALLBACK"
