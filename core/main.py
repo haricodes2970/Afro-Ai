@@ -53,10 +53,16 @@ _focus_agent: ProcessAgent | None      = None
 _focus_thread: threading.Thread | None = None
 _listener: "AfroListener | None"       = None
 
-# CockpitUI handles (populated in main() when Qt is available)
+# CockpitUI handles
 _qt_app  = None
 _cockpit = None
-_bridge: "object | None" = None   # _UiBridge instance
+_bridge: "object | None" = None
+
+# ── Thread-safe agent state ───────────────────────────────────────────────────
+
+_state_lock  = threading.Lock()
+_agent_state = "STANDBY"   # "ACTIVE" | "STANDBY"
+_is_speaking = False        # True while _synth.speak() is blocking
 
 
 # ── UI bridge (Qt cross-thread signals) ──────────────────────────────────────
@@ -65,19 +71,24 @@ if _QT_AVAILABLE:
     class _UiBridge(QObject):
         speaking_changed    = pyqtSignal(bool)
         log_message         = pyqtSignal(str)
-        agent_state_changed = pyqtSignal(str, str)
+        agent_state_changed = pyqtSignal(str)
 
 
 # ── Speak / log helpers ───────────────────────────────────────────────────────
 
 def _speak(msg: str) -> None:
-    """Speak via synthesizer and update CockpitUI orb if available."""
+    """Speak via synthesizer; drive orb neon-green → blue via bridge signals."""
+    global _is_speaking
+    with _state_lock:
+        _is_speaking = True
     if _bridge is not None:
         try:
             _bridge.speaking_changed.emit(True)
         except Exception:
             pass
     _synth.speak(msg)
+    with _state_lock:
+        _is_speaking = False
     if _bridge is not None:
         try:
             _bridge.speaking_changed.emit(False)
@@ -86,7 +97,7 @@ def _speak(msg: str) -> None:
 
 
 def _ui_log(msg: str) -> None:
-    """Log to brain DB and CockpitUI log panel if available."""
+    """Log to dashboard brain and CockpitUI terminal (thread-safe)."""
     log_brain(msg)
     if _bridge is not None:
         try:
@@ -294,13 +305,13 @@ def _handle_dev_ops(intent_label: str, transcribed_text: str, row_id: int) -> No
 
     except (ConnectionError, TimeoutError) as e:
         _ui_log(f"Dev ops connection error: {e}")
-        _speak("API quota exceeded. Falling back to local keyword engine.")
+        _speak("Cloud brain limited. Try a direct command.")
         set_exec_state("FAILED", "CONNECTION")
         update_feedback(row_id, False)
     except Exception as e:
         _ui_log(f"Dev ops error: {e}")
         if _is_api_error(e):
-            _speak("API quota exceeded. Falling back to local keyword engine.")
+            _speak("Cloud brain limited. Try a direct command.")
             set_exec_state("FAILED", "API_QUOTA")
         else:
             _speak("Dev operation failed. Please try again.")
@@ -326,7 +337,6 @@ def _handle_remember(transcribed_text: str) -> None:
     if stored:
         _speak("Got it. I'll remember that.")
         _ui_log(f"Remembered: {content[:80]}")
-        print(f"[Memory] Stored: {content}")
     else:
         _speak("I already have that in memory.")
         _ui_log(f"Already remembered: {content[:80]}")
@@ -367,7 +377,11 @@ def _handle_os_ops(transcribed_text: str, row_id: int) -> None:
     def _run():
         try:
             orch = Orchestrator()
-            executed = orch.run_director_loop(transcribed_text, synth=_synth)
+            executed = orch.run_director_loop(
+                transcribed_text,
+                synth=_synth,
+                ui_log=_ui_log,
+            )
             update_output(row_id, "; ".join(executed) if executed else "no steps executed")
             update_feedback(row_id, bool(executed))
             _ui_log(f"OS_OPS director complete: {len(executed)} step(s)")
@@ -393,7 +407,6 @@ def _activate_deep_focus() -> None:
     )
     _focus_thread.start()
     _ui_log("Deep Focus mode activated.")
-    print("[Main] Deep Focus mode ACTIVE.")
 
 
 def _deactivate_deep_focus() -> None:
@@ -404,12 +417,18 @@ def _deactivate_deep_focus() -> None:
     stop_deep_focus()
     stop_hud()
     _ui_log("Deep Focus mode deactivated.")
-    print("[Main] Deep Focus mode STANDBY.")
 
 
 # ── Wake-word callback ────────────────────────────────────────────────────────
 
 def on_wake_word_detected() -> None:
+    # Ignore if agent is not active or already speaking
+    with _state_lock:
+        if _agent_state != "ACTIVE":
+            return
+        if _is_speaking:
+            return
+
     _speak("Listening...")
     _ui_log("Wake word detected.")
 
@@ -417,19 +436,16 @@ def on_wake_word_detected() -> None:
     audio_data = capture_audio()
 
     if not audio_data:
-        print("[Warning] No audio captured.")
         _ui_log("Warning: no audio captured.")
         return
 
     try:
         transcribed_text = process_speech(audio_data)
     except Exception as e:
-        print(f"[Transcription error] {e}")
         _ui_log(f"Transcription error: {e}")
         return
 
     if not transcribed_text:
-        print("[Warning] Empty transcription.")
         _ui_log("Warning: empty transcription.")
         return
 
@@ -446,13 +462,13 @@ def on_wake_word_detected() -> None:
             action  = local_result.get("action", "local")
             details = local_result.get("details", {})
             row_id  = log_command(transcribed_text, action.upper())
-            _ui_log(f"Local: {action} {details}")
+            _ui_log(f"[FAST-PATH] Executing {action} {details}")
             update_feedback(row_id, True)
             return
     except Exception as e:
         _ui_log(f"LocalRouter error (continuing to LLM): {e}")
 
-    # ── special commands (pre-routing) ────────────────────────────
+    # ── special commands ──────────────────────────────────────────
 
     if "remember this" in lower:
         row_id = log_command(transcribed_text, "REMEMBER")
@@ -491,7 +507,7 @@ def on_wake_word_detected() -> None:
         _handle_os_ops(transcribed_text, row_id)
         return
 
-    # ── focus mode commands (pre-routing) ────────────────────────
+    # ── focus mode commands ───────────────────────────────────────
     if any(k in lower for k in ("enter deep focus", "deep focus mode", "focus mode", "start focus")):
         row_id = log_command(transcribed_text, "ENTER_FOCUS")
         threading.Thread(target=_activate_deep_focus, daemon=True).start()
@@ -506,17 +522,18 @@ def on_wake_word_detected() -> None:
         update_feedback(row_id, True)
         return
 
-    # ── normal intent routing ─────────────────────────────────────
+    # ── LLM intent routing ────────────────────────────────────────
+    _ui_log("[FALLBACK] Consulting cloud reasoning...")
     try:
         intent_label = _intent_router.route(transcribed_text)
     except (ConnectionError, TimeoutError) as e:
         _ui_log(f"Intent routing connection error — keyword fallback: {e}")
-        _speak("API quota exceeded. Falling back to local keyword engine.")
+        _speak("Cloud brain limited. Try a direct command.")
         intent_label = _keyword_route_fallback(lower)
     except Exception as e:
         _ui_log(f"Intent routing failed — keyword fallback: {e}")
         if _is_api_error(e):
-            _speak("API quota exceeded. Falling back to local keyword engine.")
+            _speak("Cloud brain limited. Try a direct command.")
         else:
             _speak("Routing failed. Using keyword engine.")
         intent_label = _keyword_route_fallback(lower)
@@ -568,7 +585,11 @@ class AfroListener(VoiceListener):
                         print("AFRO IS ACTIVE")
                         print("=========================\n")
                         self.oww_model.reset()
-                        self._callback()
+                        threading.Thread(
+                            target=self._callback,
+                            daemon=True,
+                            name="AfroWakeCallback",
+                        ).start()
                         break
 
             except OSError as e:
@@ -578,22 +599,80 @@ class AfroListener(VoiceListener):
                 time.sleep(0.1)
 
 
-# ── GUI listener thread target ────────────────────────────────────────────────
+# ── GUI lifecycle (called from CockpitUI signals) ─────────────────────────────
 
 def _on_gui_start() -> None:
-    """Called from CockpitUI ACTIVATE button — runs in daemon thread."""
-    global _listener
-    _speak("Afro online. Say hey Jarvis to activate.")
+    """
+    Runs in daemon thread on ACTIVATE.
+
+    Sequence:
+      1. Set agent_state = ACTIVE
+      2. Greeting → orb neon green (speaking)
+      3. Speak returns → orb electric blue (listening)
+      4. Start listener loop (blocks until STANDBY)
+    """
+    global _listener, _agent_state
+
+    with _state_lock:
+        _agent_state = "ACTIVE"
+
+    # Guard: don't start a second listener if one is running
+    if _listener is not None and not getattr(_listener, "_shutdown", True):
+        _ui_log("Listener already running.")
+        return
+
+    # Step 1 — proactive greeting; orb drives to neon green then blue automatically
+    _speak("Afro Active. Systems initialized. What do you need?")
+
+    # Step 2 — check state; may have been interrupted during greeting
+    with _state_lock:
+        still_active = _agent_state == "ACTIVE"
+
+    if not still_active:
+        _ui_log("Standby received during greeting — aborting listener start.")
+        return
+
+    # Step 3 — orb is already electric-blue (speaking_changed(False) was emitted)
+    _ui_log("Listening for wake word...")
+
+    # Step 4 — start listener (blocking)
     _listener = AfroListener(callback=on_wake_word_detected)
     try:
         _listener.start()
     except Exception as e:
-        print(f"[Listener error] {e}")
         _ui_log(f"Listener error: {e}")
+        print(f"[Listener error] {e}")
 
 
 def _on_gui_stop() -> None:
-    """Called from CockpitUI STANDBY button."""
+    """
+    Called on STANDBY.
+
+    Sequence:
+      1. Set agent_state = STANDBY
+      2. Stop synthesizer mid-speech (best-effort)
+      3. Force orb back to idle blue
+      4. Stop listener
+    """
+    global _agent_state
+
+    with _state_lock:
+        _agent_state = "STANDBY"
+
+    # Stop synth — interrupts any in-progress speak()
+    try:
+        _synth.stop()
+    except Exception:
+        pass
+
+    # Force orb to idle/blue regardless of speaking state
+    if _bridge is not None:
+        try:
+            _bridge.speaking_changed.emit(False)
+        except Exception:
+            pass
+
+    # Stop listener
     global _listener
     if _listener is not None:
         _listener._shutdown = True
@@ -601,7 +680,8 @@ def _on_gui_stop() -> None:
             _listener._cleanup()
         except Exception:
             pass
-    _ui_log("Listener stopped via GUI.")
+
+    _ui_log("Agent standby.")
 
 
 # ── Shutdown ──────────────────────────────────────────────────────────────────
@@ -644,7 +724,6 @@ def main() -> None:
     _scheduler.run_loop()
     print("Scheduler agent started.")
 
-    # Build app index in background (non-blocking)
     try:
         from agents.app_indexer import start_background_indexing
         start_background_indexing()
@@ -667,6 +746,7 @@ def main() -> None:
             _bridge = _UiBridge()
             _bridge.speaking_changed.connect(_cockpit.set_speaking)
             _bridge.log_message.connect(_cockpit.append_log)
+            _bridge.agent_state_changed.connect(_cockpit.set_agent_state)
 
             print("CockpitUI launched.")
             _ui_log("CockpitUI mode active.")
@@ -682,7 +762,12 @@ def main() -> None:
             print(f"[CockpitUI] Launch failed ({e}) — falling back to headless mode.")
 
     # ── Headless fallback ─────────────────────────────────────────
+    global _agent_state
+    with _state_lock:
+        _agent_state = "ACTIVE"
+
     print("Initializing voice system (headless mode)...")
+    _speak("Afro online.")
     _listener = AfroListener(callback=on_wake_word_detected)
 
     try:
