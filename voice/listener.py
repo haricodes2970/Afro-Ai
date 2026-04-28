@@ -1,14 +1,17 @@
+import io
 import os
 import sys
 import subprocess
 import time
+import contextlib
 
 import numpy as np
 import pyaudio
 
-SAMPLE_RATE = 16000
-FRAME_LENGTH = 1280  # openwakeword expects 80ms chunks at 16kHz
-DEFAULT_MODEL = "alexa"
+SAMPLE_RATE      = 16000
+FRAME_LENGTH     = 1280          # 80ms at 16kHz
+DEFAULT_MODEL    = "hey_jarvis"
+MODEL_FILE       = "hey_jarvis_v0.1.onnx"
 DETECTION_THRESHOLD = 0.5
 
 
@@ -20,65 +23,77 @@ def _get_model_dir() -> str:
         return ""
 
 
-def _model_exists(model_name: str) -> bool:
+def _model_exists() -> bool:
     model_dir = _get_model_dir()
     if not model_dir or not os.path.isdir(model_dir):
         return False
-    return any(
-        f.lower().startswith(model_name.lower())
-        for f in os.listdir(model_dir)
-    )
+    target = MODEL_FILE.lower()
+    return any(f.lower() == target for f in os.listdir(model_dir))
 
 
-def _download_model(model_name: str) -> bool:
-    print(f"Wake word model not found. Downloading...")
+def _download_model() -> bool:
+    print("hey_jarvis model missing. Downloading...")
+    # Primary: openwakeword Python API
     try:
         from openwakeword.utils import download_models
-        download_models([model_name])
-        return True
+        download_models([DEFAULT_MODEL])
+        if _model_exists():
+            return True
     except Exception:
         pass
 
+    # Secondary: openwakeword.download CLI (matches spec)
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "openwakeword", "--download_models", model_name],
+            [sys.executable, "-m", "openwakeword.download", "--models", DEFAULT_MODEL],
             timeout=120,
             capture_output=True,
             text=True,
         )
-        if result.returncode == 0:
+        if result.returncode == 0 and _model_exists():
             return True
-        print(f"[openwakeword] Download stderr: {result.stderr.strip()}")
-        return False
+        if result.stderr.strip():
+            print(f"[openwakeword] Download stderr: {result.stderr.strip()}")
     except Exception as e:
         print(f"[openwakeword] Download failed: {e}")
-        return False
+
+    # Tertiary: legacy CLI flag
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "openwakeword", "--download_models", DEFAULT_MODEL],
+            timeout=120,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0 and _model_exists():
+            return True
+    except Exception:
+        pass
+
+    return False
 
 
 class VoiceListener:
     def __init__(self, model_path: str = DEFAULT_MODEL):
         self.model_path = model_path
-        self.oww_model = None
-        self.audio = None
-        self.stream = None
+        self.oww_model  = None
+        self.audio      = None
+        self.stream     = None
+        self._shutdown  = False
 
     def _resolve_model(self) -> bool:
-        name = os.path.basename(self.model_path).split(".")[0]
-        is_named = not os.path.isfile(self.model_path)
-
-        if is_named and not _model_exists(name):
-            ok = _download_model(name)
-            if not ok or not _model_exists(name):
-                print(f"[openwakeword] Model '{name}' unavailable after download attempt.")
+        if not _model_exists():
+            ok = _download_model()
+            if not ok or not _model_exists():
+                print(f"[openwakeword] '{MODEL_FILE}' unavailable after download attempt.")
                 return False
-
         return True
 
     def _load_model(self):
         from openwakeword.model import Model
 
         if not self._resolve_model():
-            raise RuntimeError(f"Model '{self.model_path}' could not be resolved.")
+            raise RuntimeError(f"Model '{MODEL_FILE}' could not be resolved.")
 
         self.oww_model = Model(
             wakeword_models=[self.model_path],
@@ -86,7 +101,9 @@ class VoiceListener:
         )
 
     def _setup_stream(self):
-        self.audio = pyaudio.PyAudio()
+        # Suppress PyAudio ALSA/JACK noise during init
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.audio = pyaudio.PyAudio()
         self.stream = self.audio.open(
             rate=SAMPLE_RATE,
             channels=1,
@@ -97,7 +114,7 @@ class VoiceListener:
 
     def _detection_loop(self):
         print("Listening for wake word...")
-        while True:
+        while not self._shutdown:
             try:
                 raw = self.stream.read(FRAME_LENGTH, exception_on_overflow=False)
                 frame = np.frombuffer(raw, dtype=np.int16)
@@ -106,21 +123,33 @@ class VoiceListener:
                 for _model_name, score in prediction.items():
                     if score >= DETECTION_THRESHOLD:
                         print("\n=========================")
-                        print("AFRO wake word detected")
+                        print("AFRO IS ACTIVE")
                         print("=========================\n")
                         self.oww_model.reset()
                         break
 
             except OSError as e:
+                if self._shutdown:
+                    break
                 print(f"[Audio error] {e}")
                 time.sleep(0.1)
 
     def _cleanup(self):
+        self._shutdown = True
         if self.stream is not None:
-            self.stream.stop_stream()
-            self.stream.close()
+            try:
+                self.stream.stop_stream()
+            except Exception:
+                pass
+            try:
+                self.stream.close()
+            except Exception:
+                pass
         if self.audio is not None:
-            self.audio.terminate()
+            try:
+                self.audio.terminate()
+            except Exception:
+                pass
 
     def _fallback_mode(self, reason: str = ""):
         if reason:
@@ -135,10 +164,10 @@ class VoiceListener:
             )
             print("[Fallback] No recognition engine available. Standing by. Press Ctrl+C to exit.")
             try:
-                while True:
-                    time.sleep(3600)
+                while not self._shutdown:
+                    time.sleep(1)
             except KeyboardInterrupt:
-                print("\n[Shutdown] KeyboardInterrupt received.")
+                pass
             return
 
         print("[Fallback] SpeechRecognition active. Speak freely — no wake word needed.\n")
@@ -149,10 +178,10 @@ class VoiceListener:
         except OSError as e:
             print(f"[Fallback] Microphone unavailable: {e}. Standing by.")
             try:
-                while True:
-                    time.sleep(3600)
+                while not self._shutdown:
+                    time.sleep(1)
             except KeyboardInterrupt:
-                print("\n[Shutdown] KeyboardInterrupt received.")
+                pass
             return
 
         try:
@@ -161,7 +190,7 @@ class VoiceListener:
         except Exception as e:
             print(f"[Fallback] Ambient noise calibration failed: {e}")
 
-        while True:
+        while not self._shutdown:
             try:
                 with mic as source:
                     print("Listening...")
@@ -176,11 +205,11 @@ class VoiceListener:
             except sr.WaitTimeoutError:
                 pass
             except OSError as e:
-                print(f"[Fallback microphone error] {e}")
+                if not self._shutdown:
+                    print(f"[Fallback microphone error] {e}")
                 time.sleep(1)
             except KeyboardInterrupt:
-                print("\n[Shutdown] KeyboardInterrupt received.")
-                return
+                break
 
     def start(self):
         try:
@@ -200,7 +229,7 @@ class VoiceListener:
         try:
             self._detection_loop()
         except KeyboardInterrupt:
-            print("\n[Shutdown] KeyboardInterrupt received.")
+            pass
         finally:
             self._cleanup()
 
