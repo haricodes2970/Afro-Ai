@@ -108,7 +108,17 @@ def _handle_open(raw_name: str) -> dict | str:
         except Exception:
             pass
 
-        # Prefer indexed full path when available; fall back to alias target
+        # Validate indexed path — stale entry triggers background rebuild
+        if indexed_path and not os.path.exists(indexed_path):
+            print(f"[LocalRouter] Stale index path: {indexed_path!r} — scheduling rebuild.")
+            try:
+                from agents.app_indexer import start_background_indexing
+                start_background_indexing()
+            except Exception:
+                pass
+            indexed_path = None  # fall through to alias table
+
+        # Prefer indexed full path; fall back to alias target
         target = indexed_path or normalized_app
         if not target:
             return "FALLBACK"
