@@ -157,10 +157,10 @@ circle.fill.gpu { stroke: var(--accent-gpu); }
 /* ── Brain Feed ──────────────────────────────────────── */
 .feed-card {
   grid-column: 4;
-  grid-row: 1 / 4;
+  grid-row: 1 / 6;
   display: flex;
   flex-direction: column;
-  max-height: 520px;
+  max-height: 700px;
 }
 
 .feed-card ul {
@@ -189,10 +189,10 @@ circle.fill.gpu { stroke: var(--accent-gpu); }
 /* ── Clipboard Preview ───────────────────────────────── */
 .clip-card {
   grid-column: 5;
-  grid-row: 1 / 4;
+  grid-row: 1 / 6;
   display: flex;
   flex-direction: column;
-  max-height: 520px;
+  max-height: 700px;
 }
 
 .clip-card pre {
@@ -211,43 +211,105 @@ circle.fill.gpu { stroke: var(--accent-gpu); }
   scrollbar-color: var(--glass-border) transparent;
 }
 
-/* ── Agent Action Indicator ──────────────────────────── */
+/* ── Aura Keyframes ──────────────────────────────────── */
+@keyframes aura-idle {
+  0%, 100% {
+    box-shadow: 0 0 4px rgba(100,116,139,0.15);
+    border-color: var(--glass-border);
+  }
+  50% {
+    box-shadow: 0 0 14px rgba(100,116,139,0.35);
+    border-color: rgba(100,116,139,0.35);
+  }
+}
+
+@keyframes aura-running {
+  0%, 100% {
+    box-shadow: 0 0 8px rgba(57,255,20,0.4), 0 0 20px rgba(57,255,20,0.15);
+    border-color: rgba(57,255,20,0.6);
+    transform: scale(1);
+  }
+  50% {
+    box-shadow: 0 0 24px rgba(57,255,20,0.8), 0 0 48px rgba(57,255,20,0.35);
+    border-color: #39FF14;
+    transform: scale(1.008);
+  }
+}
+
+@keyframes aura-failed {
+  0%, 100% { opacity: 1;   border-color: rgba(239,68,68,0.8);  box-shadow: 0 0 10px rgba(239,68,68,0.5); }
+  25%       { opacity: 0.7; border-color: rgba(239,68,68,0.3);  box-shadow: none; }
+  75%       { opacity: 0.85;border-color: #ef4444;              box-shadow: 0 0 20px rgba(239,68,68,0.7); }
+}
+
+@keyframes dot-pulse {
+  0%, 100% { opacity: 1;   transform: scale(1); }
+  50%      { opacity: 0.4; transform: scale(0.75); }
+}
+
+/* ── Aura Action Card ────────────────────────────────── */
 .action-card {
   grid-column: 1 / 4;
   display: flex;
   flex-direction: column;
   gap: 10px;
+  will-change: transform, opacity;
   transition: border-color 0.3s ease, box-shadow 0.3s ease;
 }
 
-.action-status-row {
+.state-idle {
+  animation: aura-idle 5s ease-in-out infinite;
+}
+
+.state-running {
+  animation: aura-running 1.4s ease-in-out infinite;
+}
+
+.state-failed {
+  animation: aura-failed 0.6s ease-in-out infinite;
+}
+
+.aura-header {
   display: flex;
   align-items: center;
-  gap: 10px;
+  justify-content: space-between;
+  margin-bottom: 4px;
 }
 
-.action-status-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--text-dim);
-  flex-shrink: 0;
-  transition: background 0.3s ease;
+.aura-label {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-dim);
 }
 
-.action-status-label {
-  font-size: 0.72rem;
+.aura-state-badge {
+  font-size: 0.65rem;
   font-weight: 700;
   letter-spacing: 0.14em;
+  padding: 2px 9px;
+  border-radius: 20px;
+  border: 1px solid var(--glass-border);
   color: var(--text-dim);
-  transition: color 0.3s ease;
+  transition: color 0.3s ease, border-color 0.3s ease;
 }
 
-.action-text {
-  font-size: 0.82rem;
-  color: var(--text);
+.state-running .aura-state-badge {
+  color: #39FF14;
+  border-color: #39FF14;
+}
+
+.state-failed .aura-state-badge {
+  color: #ef4444;
+  border-color: #ef4444;
+}
+
+.aura-action-text {
+  font-size: 0.8rem;
+  color: var(--text-dim);
   padding: 8px 12px;
-  background: rgba(0,0,0,0.2);
+  background: rgba(0,0,0,0.22);
   border-radius: 8px;
   border-left: 2px solid var(--glass-border);
   white-space: nowrap;
@@ -256,40 +318,91 @@ circle.fill.gpu { stroke: var(--accent-gpu); }
   transition: border-color 0.3s ease;
 }
 
-/* Status variants */
-.exec-idle    .action-status-dot  { background: var(--text-dim); }
-.exec-idle    .action-status-label{ color: var(--text-dim); }
-
-.exec-running .action-status-dot  { background: #39FF14; }
-.exec-running .action-status-label{ color: #39FF14; }
-.exec-running .action-text        { border-color: #39FF14; }
-.exec-running {
-  border-color: rgba(57,255,20,0.4) !important;
-  box-shadow: 0 0 20px rgba(57,255,20,0.12) !important;
+.aura-action-text span {
+  color: var(--text);
+  font-weight: 500;
 }
 
-.exec-success .action-status-dot  { background: #22c55e; }
-.exec-success .action-status-label{ color: #22c55e; }
-.exec-success .action-text        { border-color: #22c55e; }
+.state-running .aura-action-text { border-color: #39FF14; }
+.state-failed  .aura-action-text { border-color: #ef4444; }
 
-.exec-failed  .action-status-dot  { background: #ef4444; }
-.exec-failed  .action-status-label{ color: #ef4444; }
-.exec-failed  .action-text        { border-color: #ef4444; }
-
-/* Neon pulse animation — fires when RUNNING */
-@keyframes neon-pulse {
-  0%   { box-shadow: 0 0 6px rgba(57,255,20,0.3); }
-  50%  { box-shadow: 0 0 22px rgba(57,255,20,0.7), 0 0 40px rgba(57,255,20,0.3); }
-  100% { box-shadow: 0 0 6px rgba(57,255,20,0.3); }
+.aura-dot-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
-.action-status-dot.pulse {
-  animation: neon-pulse 1.2s ease-in-out infinite;
+.aura-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  flex-shrink: 0;
+  will-change: opacity, transform;
+  transition: background 0.3s ease;
 }
+
+.state-running .aura-dot {
+  background: #39FF14;
+  box-shadow: 0 0 6px #39FF14;
+}
+
+.state-failed .aura-dot {
+  background: #ef4444;
+  box-shadow: 0 0 6px #ef4444;
+}
+
+.aura-dot-pulse {
+  animation: dot-pulse 0.9s ease-in-out infinite;
+}
+
+.aura-dot-label {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  letter-spacing: 0.05em;
+  transition: color 0.3s ease;
+}
+
+.state-running .aura-dot-label { color: #39FF14; }
+.state-failed  .aura-dot-label { color: #ef4444; }
+
+/* ── Action Log ──────────────────────────────────────── */
+.action-log-card {
+  grid-column: 1 / 4;
+  max-height: 200px;
+  display: flex;
+  flex-direction: column;
+}
+
+#action-log {
+  flex: 1;
+  overflow-y: auto;
+  font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  font-size: 0.72rem;
+  line-height: 1.6;
+  background: rgba(0,0,0,0.25);
+  border-radius: 10px;
+  padding: 10px 12px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--glass-border) transparent;
+}
+
+.log-line {
+  color: var(--text-dim);
+  padding: 1px 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.log-run   { color: #39FF14; }
+.log-ok    { color: #22c55e; }
+.log-error { color: #ef4444; }
+.log-info  { color: var(--accent-ok); }
 
 /* ── Focus Tracker ───────────────────────────────────── */
 .focus-card {
   grid-column: 1 / 4;
+  grid-row: 2;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -380,7 +493,7 @@ circle.fill.gpu { stroke: var(--accent-gpu); }
 /* ── Voice Controls ──────────────────────────────────── */
 .voice-card {
   grid-column: 1 / 4;
-  grid-row: 3;
+  grid-row: 5;
   display: flex;
   flex-direction: column;
   gap: 18px;
@@ -494,6 +607,10 @@ circle.fill.gpu { stroke: var(--accent-gpu); }
     grid-column: auto;
     grid-row: auto;
     max-height: 320px;
+  }
+  .focus-card, .action-card, .action-log-card, .voice-card {
+    grid-column: auto;
+    grid-row: auto;
   }
 }
 
