@@ -40,6 +40,7 @@ print(f"[IntentRouter] Mode: {_llm_mode}")
 VALID_LABELS = {
     "FILE_OPS", "PROCESS_OPS", "CALENDAR_OPS", "SYSTEM_QUERY",
     "DEV_OPTIMIZE", "DEV_EXPLAIN", "DEV_DEBUG",
+    "ENTER_FOCUS", "EXIT_FOCUS",
     "UNKNOWN",
 }
 
@@ -65,6 +66,8 @@ SYSTEM_PROMPT = (
     "DEV_OPTIMIZE — optimize, improve, refactor, speed up code\n"
     "DEV_EXPLAIN — explain, describe, summarize code\n"
     "DEV_DEBUG — debug, fix, find error, solve bug in code\n"
+    "ENTER_FOCUS — activate deep focus mode, start focus, enter focus\n"
+    "EXIT_FOCUS — standby, exit focus mode, stop focus, deactivate\n"
     "UNKNOWN — anything else"
 )
 
@@ -124,6 +127,13 @@ _llm = _build_llm()
 
 def _keyword_route(text: str) -> str:
     lower = text.lower()
+
+    # Focus controls — check before generic keywords
+    if any(k in lower for k in ("deep focus", "focus mode", "enter focus", "start focus")):
+        return "ENTER_FOCUS"
+    if any(k in lower for k in ("standby", "exit focus", "stop focus", "leave focus", "deactivate focus")):
+        return "EXIT_FOCUS"
+
     if any(k in lower for k in ("optimize", "refactor", "improve", "speed up")):
         return "DEV_OPTIMIZE"
     if any(k in lower for k in ("explain", "describe", "summarize", "what does")):
