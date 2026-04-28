@@ -53,12 +53,22 @@ def _telemetry_loop() -> None:
             clip = get_text()
             clip_preview = clip[:300] if clip else ""
 
+            watcher_state: dict = {}
+            try:
+                from core.watcher import get_watcher_state
+                watcher_state = get_watcher_state()
+            except Exception:
+                pass
+
             socketio.emit("telemetry", {
                 "cpu": cpu,
                 "ram": ram,
                 "gpu": gpu,
                 "brain_feed": feed_snapshot,
                 "clipboard_preview": clip_preview,
+                "active_window": watcher_state.get("active_window", ""),
+                "focus_duration_minutes": watcher_state.get("focus_duration_minutes", 0),
+                "health_status": watcher_state.get("health_status", "NORMAL"),
             })
         except Exception as e:
             print(f"[Dashboard] Telemetry error: {e}")
