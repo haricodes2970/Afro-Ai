@@ -95,6 +95,16 @@
       <pre id="clipPreview"></pre>
     </div>
 
+    <!-- Agent Action Indicator -->
+    <div class="card action-card" id="actionCard">
+      <h3>⚡ Agent Action</h3>
+      <div class="action-status-row">
+        <span class="action-status-dot" id="actionDot"></span>
+        <span class="action-status-label" id="actionStatus">IDLE</span>
+      </div>
+      <div class="action-text" id="actionText">—</div>
+    </div>
+
     <!-- Voice Controls -->
     <div class="card voice-card">
       <h3>⟵ Voice Controls</h3>
@@ -189,6 +199,24 @@
 
       setBar("cpuBar",  "cpuBarVal",  data.cpu, status);
       setBar("gpuBar",  "gpuBarVal",  data.gpu, status);
+
+      // Agent action indicator
+      const execStatus  = data.execution_status || "IDLE";
+      const actionText  = data.current_action   || "—";
+      const actionCard  = document.getElementById("actionCard");
+      const actionDot   = document.getElementById("actionDot");
+      const actionLbl   = document.getElementById("actionStatus");
+      const actionTxt   = document.getElementById("actionText");
+
+      actionLbl.textContent = execStatus;
+      actionTxt.textContent = actionText;
+
+      actionCard.classList.remove("exec-idle", "exec-running", "exec-success", "exec-failed");
+      actionDot.classList.remove("pulse");
+
+      const cls = "exec-" + execStatus.toLowerCase();
+      actionCard.classList.add(cls);
+      if (execStatus === "RUNNING") actionDot.classList.add("pulse");
     });
 
     // Mute toggle
