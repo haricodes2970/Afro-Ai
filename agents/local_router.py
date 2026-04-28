@@ -93,28 +93,50 @@ def _resolve_app(raw_name: str) -> str | None:
 
 def _handle_open(raw_name: str) -> dict | str:
     try:
-        raw_name       = _sanitize(raw_name)
-        normalized_app = _resolve_app(raw_name)
-        if not normalized_app:
+        raw_name = _sanitize(raw_name)
+        if not raw_name:
             return "FALLBACK"
 
-        print(f"Local execution: open {normalized_app!r}")
+        # 1. Alias table + difflib (known apps, fast)
+        normalized_app = _resolve_app(raw_name)
+
+        # 2. App indexer (full Start Menu scan, broader coverage)
+        indexed_path: str | None = None
+        try:
+            from agents.app_indexer import get_app_path
+            indexed_path = get_app_path(raw_name)
+        except Exception:
+            pass
+
+        # Prefer indexed full path when available; fall back to alias target
+        target = indexed_path or normalized_app
+        if not target:
+            return "FALLBACK"
+
+        print(f"Local execution: open {target!r}")
 
         launched = False
 
-        # Primary: os.startfile (Windows)
+        # Primary: os.startfile (Windows — handles .exe, .lnk, protocols)
         if sys.platform == "win32":
             try:
-                os.startfile(normalized_app)
+                os.startfile(target)
                 launched = True
             except (OSError, FileNotFoundError):
-                pass
+                # If startfile failed and we have an alias fallback, try that
+                if indexed_path and normalized_app and normalized_app != indexed_path:
+                    try:
+                        os.startfile(normalized_app)
+                        launched = True
+                        target = normalized_app
+                    except (OSError, FileNotFoundError):
+                        pass
 
-        # Fallback: subprocess.Popen
+        # Secondary: subprocess.Popen
         if not launched:
             try:
                 subprocess.Popen(
-                    [normalized_app],
+                    [target],
                     shell=False,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
@@ -124,13 +146,13 @@ def _handle_open(raw_name: str) -> dict | str:
                 pass
 
         if not launched:
-            print(f"[LocalRouter] '{normalized_app}' not found — falling back to API router.")
+            print(f"[LocalRouter] '{target}' not found — falling back to API router.")
             return "FALLBACK"
 
         return {
             "status":  "HANDLED",
             "action":  "open_app",
-            "details": {"app": normalized_app},
+            "details": {"app": target},
         }
 
     except ValueError as e:
