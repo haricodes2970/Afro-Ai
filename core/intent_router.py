@@ -2,9 +2,19 @@ import os
 import sys
 
 from dotenv import load_dotenv
-from langchain_core.messages import HumanMessage, SystemMessage
 
 load_dotenv()
+
+try:
+    from langchain_core.messages import HumanMessage, SystemMessage
+    from langchain_openai import ChatOpenAI
+    _langchain_available = True
+except ImportError:
+    _langchain_available = False
+    print(
+        "[IntentRouter] LangChain not installed. Using keyword routing.\n"
+        "  pip install langchain langchain-openai langchain-core"
+    )
 
 VALID_LABELS = {"FILE_OPS", "PROCESS_OPS", "CALENDAR_OPS", "SYSTEM_QUERY", "UNKNOWN"}
 
@@ -39,6 +49,9 @@ _USE_LOCAL = not bool(os.getenv("OPENAI_API_KEY", "").strip())
 
 
 def _build_llm():
+    if not _langchain_available:
+        return None
+
     if _USE_LOCAL:
         try:
             from langchain_community.llms import LlamaCpp
@@ -59,8 +72,11 @@ def _build_llm():
             print(f"[IntentRouter] Local LLM failed: {e}. Falling back to keyword routing.", file=sys.stderr)
             return None
     else:
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+        try:
+            return ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
+        except Exception as e:
+            print(f"[IntentRouter] ChatOpenAI init failed: {e}. Falling back to keyword routing.", file=sys.stderr)
+            return None
 
 
 _llm = _build_llm()
