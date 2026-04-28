@@ -2,6 +2,7 @@ import sys
 import os
 import time
 import threading
+from datetime import datetime
 
 import numpy as np
 import pyaudio
@@ -16,7 +17,8 @@ from core.system_tray import start_tray
 from core.dashboard import start_dashboard, log_brain, socketio
 from core.memory import log_command, update_output, update_feedback, remember
 from core.watcher import Watcher
-from agents.process_agent import ProcessAgent
+from core.hud import start_hud, stop_hud
+from agents.process_agent import ProcessAgent, stop_deep_focus
 from agents.dev_agent import DevAgent
 from agents.meta_agent import start_meta_agent, run_review_on_command
 from agents.scheduler_agent import SchedulerAgent
@@ -25,10 +27,14 @@ SAMPLE_RATE = 16000
 CAPTURE_SECONDS = 5
 CHUNK = 1024
 
-_synth = VoiceSynthesizer()
+_synth         = VoiceSynthesizer()
 _intent_router = IntentRouter()
-_watcher = Watcher(synth=_synth)
-_scheduler = SchedulerAgent(synth=_synth)
+_watcher       = Watcher(synth=_synth)
+_scheduler     = SchedulerAgent(synth=_synth)
+
+deep_focus_active   = False
+_focus_agent: ProcessAgent | None = None
+_focus_thread: threading.Thread | None = None
 
 
 @socketio.on("set_mute")
@@ -42,6 +48,7 @@ def _on_set_speed(data):
         _synth.set_speed(float(data.get("speed", 1.0)))
     except (TypeError, ValueError):
         pass
+
 
 PROCESS_OP_KEYWORDS = {
     "status": "STATUS",
@@ -186,7 +193,6 @@ def _handle_dev_ops(intent_label: str, transcribed_text: str, row_id: int) -> No
 
 
 def _handle_remember(transcribed_text: str) -> None:
-    """Extract content after 'remember this' and store to long-term memory."""
     lower = transcribed_text.lower()
     marker = "remember this"
     idx = lower.find(marker)
@@ -208,6 +214,34 @@ def _handle_remember(transcribed_text: str) -> None:
     else:
         _synth.speak("I already have that in memory.")
         log_brain(f"Already remembered: {content[:80]}")
+
+
+def _activate_deep_focus() -> None:
+    global deep_focus_active, _focus_agent, _focus_thread
+    if deep_focus_active:
+        return
+    deep_focus_active = True
+    _focus_agent = ProcessAgent()
+    start_hud(focus_start=datetime.now())
+    _focus_thread = threading.Thread(
+        target=_focus_agent.enforce_deep_focus,
+        daemon=True,
+        name="AfroDeepFocus",
+    )
+    _focus_thread.start()
+    log_brain("Deep Focus mode activated.")
+    print("[Main] Deep Focus mode ACTIVE.")
+
+
+def _deactivate_deep_focus() -> None:
+    global deep_focus_active
+    if not deep_focus_active:
+        return
+    deep_focus_active = False
+    stop_deep_focus()
+    stop_hud()
+    log_brain("Deep Focus mode deactivated.")
+    print("[Main] Deep Focus mode STANDBY.")
 
 
 def on_wake_word_detected() -> None:
@@ -240,6 +274,7 @@ def on_wake_word_detected() -> None:
     lower = transcribed_text.lower()
 
     # ── special commands (pre-routing) ───────────────────────────
+
     if "remember this" in lower:
         row_id = log_command(transcribed_text, "REMEMBER")
         _handle_remember(transcribed_text)
@@ -269,6 +304,21 @@ def on_wake_word_detected() -> None:
         ).start()
         return
 
+    # ── focus mode commands (pre-routing) ────────────────────────
+    if any(k in lower for k in ("enter deep focus", "deep focus mode", "focus mode", "start focus")):
+        row_id = log_command(transcribed_text, "ENTER_FOCUS")
+        threading.Thread(target=_activate_deep_focus, daemon=True).start()
+        _synth.speak("Deep Focus mode activated.")
+        update_feedback(row_id, True)
+        return
+
+    if any(k in lower for k in ("standby", "exit focus", "stop focus", "leave focus", "deactivate focus")):
+        row_id = log_command(transcribed_text, "EXIT_FOCUS")
+        threading.Thread(target=_deactivate_deep_focus, daemon=True).start()
+        _synth.speak("Returning to normal mode.")
+        update_feedback(row_id, True)
+        return
+
     # ── normal intent routing ─────────────────────────────────────
     intent_label = _intent_router.route(transcribed_text)
     print(f"Intent: {intent_label}")
@@ -276,7 +326,15 @@ def on_wake_word_detected() -> None:
 
     row_id = log_command(transcribed_text, intent_label)
 
-    if intent_label == "PROCESS_OPS":
+    if intent_label == "ENTER_FOCUS":
+        threading.Thread(target=_activate_deep_focus, daemon=True).start()
+        _synth.speak("Deep Focus mode activated.")
+        update_feedback(row_id, True)
+    elif intent_label == "EXIT_FOCUS":
+        threading.Thread(target=_deactivate_deep_focus, daemon=True).start()
+        _synth.speak("Returning to normal mode.")
+        update_feedback(row_id, True)
+    elif intent_label == "PROCESS_OPS":
         _handle_process_ops(transcribed_text, row_id)
     elif intent_label in ("DEV_OPTIMIZE", "DEV_EXPLAIN", "DEV_DEBUG"):
         threading.Thread(
@@ -344,6 +402,8 @@ def main() -> None:
         listener.start()
     except KeyboardInterrupt:
         print("\n[Shutdown] KeyboardInterrupt received.")
+        if deep_focus_active:
+            _deactivate_deep_focus()
 
 
 if __name__ == "__main__":
