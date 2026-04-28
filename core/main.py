@@ -40,10 +40,10 @@ _intent_router = IntentRouter()
 _watcher       = Watcher(synth=_synth)
 _scheduler     = SchedulerAgent(synth=_synth)
 
-deep_focus_active              = False
-_focus_agent: ProcessAgent | None    = None
+deep_focus_active                   = False
+_focus_agent: ProcessAgent | None   = None
 _focus_thread: threading.Thread | None = None
-_listener: "AfroListener | None"     = None
+_listener: "AfroListener | None"    = None
 
 
 @socketio.on("set_mute")
@@ -60,13 +60,13 @@ def _on_set_speed(data):
 
 
 PROCESS_OP_KEYWORDS = {
-    "status":   "STATUS",
-    "kill":     "KILL",
-    "terminate":"KILL",
-    "stop":     "KILL",
-    "optimize": "OPTIMIZE",
-    "clean up": "OPTIMIZE",
-    "cleanup":  "OPTIMIZE",
+    "status":    "STATUS",
+    "kill":      "KILL",
+    "terminate": "KILL",
+    "stop":      "KILL",
+    "optimize":  "OPTIMIZE",
+    "clean up":  "OPTIMIZE",
+    "cleanup":   "OPTIMIZE",
 }
 
 
@@ -126,6 +126,37 @@ def _extract_process_op(text: str) -> tuple[str, str]:
     return op, process_name
 
 
+def _keyword_route_fallback(lower: str) -> str:
+    """Keyword-only intent classifier — used when LLM routing fails."""
+    if any(k in lower for k in ("optimize", "refactor", "improve", "clean up code")):
+        return "DEV_OPTIMIZE"
+    if any(k in lower for k in ("explain", "what does", "how does", "what is")):
+        return "DEV_EXPLAIN"
+    if any(k in lower for k in ("debug", "fix", "error", "bug", "broken")):
+        return "DEV_DEBUG"
+    if any(k in lower for k in ("process", "cpu", "memory", "ram", "kill", "terminate")):
+        return "PROCESS_OPS"
+    if any(k in lower for k in ("deep focus", "focus mode", "enter focus", "start focus")):
+        return "ENTER_FOCUS"
+    if any(k in lower for k in ("standby", "exit focus", "stop focus", "leave focus")):
+        return "EXIT_FOCUS"
+    return "UNKNOWN"
+
+
+def _is_api_error(e: Exception) -> bool:
+    err = str(e).lower()
+    code = getattr(e, "status_code", None) or getattr(e, "code", None)
+    return (
+        code == 429
+        or "429" in err
+        or "quota" in err
+        or ("rate" in err and "limit" in err)
+        or isinstance(e, (ConnectionError, TimeoutError))
+        or "connection" in err
+        or "timeout" in err
+    )
+
+
 def _handle_process_ops(transcribed_text: str, row_id: int) -> None:
     agent = ProcessAgent()
     op, process_name = _extract_process_op(transcribed_text)
@@ -164,47 +195,63 @@ def _handle_process_ops(transcribed_text: str, row_id: int) -> None:
 def _handle_dev_ops(intent_label: str, transcribed_text: str, row_id: int) -> None:
     agent = DevAgent()
 
-    if intent_label == "DEV_OPTIMIZE" or "optimize this" in transcribed_text.lower():
-        _synth.speak("Analyzing code on clipboard...")
-        log_brain(f"DEV_OPTIMIZE triggered: {transcribed_text[:60]}")
-        result = agent.optimize_code()
-        if result:
-            _synth.speak("Code optimized and ready to paste.")
-            log_brain("DEV_OPTIMIZE complete.")
-            update_output(row_id, result[:500])
-            update_feedback(row_id, True)
-        else:
-            _synth.speak("Clipboard was empty or optimization failed.")
-            log_brain("DEV_OPTIMIZE failed — empty clipboard or LLM error.")
-            update_feedback(row_id, False)
+    try:
+        if intent_label == "DEV_OPTIMIZE" or "optimize this" in transcribed_text.lower():
+            _synth.speak("Analyzing code on clipboard...")
+            log_brain(f"DEV_OPTIMIZE triggered: {transcribed_text[:60]}")
+            result = agent.optimize_code()
+            if result:
+                _synth.speak("Code optimized and ready to paste.")
+                log_brain("DEV_OPTIMIZE complete.")
+                update_output(row_id, result[:500])
+                update_feedback(row_id, True)
+            else:
+                _synth.speak("Clipboard was empty or optimization failed.")
+                log_brain("DEV_OPTIMIZE failed — empty clipboard or LLM error.")
+                update_feedback(row_id, False)
 
-    elif intent_label == "DEV_EXPLAIN":
-        _synth.speak("Analyzing code on clipboard...")
-        log_brain(f"DEV_EXPLAIN triggered: {transcribed_text[:60]}")
-        result = agent.explain_code()
-        if result:
-            _synth.speak("Explanation ready. Check your clipboard.")
-            log_brain("DEV_EXPLAIN complete.")
-            update_output(row_id, result[:500])
-            update_feedback(row_id, True)
-        else:
-            _synth.speak("Clipboard was empty or explanation failed.")
-            log_brain("DEV_EXPLAIN failed.")
-            update_feedback(row_id, False)
+        elif intent_label == "DEV_EXPLAIN":
+            _synth.speak("Analyzing code on clipboard...")
+            log_brain(f"DEV_EXPLAIN triggered: {transcribed_text[:60]}")
+            result = agent.explain_code()
+            if result:
+                _synth.speak("Explanation ready. Check your clipboard.")
+                log_brain("DEV_EXPLAIN complete.")
+                update_output(row_id, result[:500])
+                update_feedback(row_id, True)
+            else:
+                _synth.speak("Clipboard was empty or explanation failed.")
+                log_brain("DEV_EXPLAIN failed.")
+                update_feedback(row_id, False)
 
-    elif intent_label == "DEV_DEBUG":
-        _synth.speak("Analyzing code on clipboard...")
-        log_brain(f"DEV_DEBUG triggered: {transcribed_text[:60]}")
-        result = agent.debug_code()
-        if result:
-            _synth.speak("Debug complete. Fixed code is ready to paste.")
-            log_brain("DEV_DEBUG complete.")
-            update_output(row_id, result[:500])
-            update_feedback(row_id, True)
+        elif intent_label == "DEV_DEBUG":
+            _synth.speak("Analyzing code on clipboard...")
+            log_brain(f"DEV_DEBUG triggered: {transcribed_text[:60]}")
+            result = agent.debug_code()
+            if result:
+                _synth.speak("Debug complete. Fixed code is ready to paste.")
+                log_brain("DEV_DEBUG complete.")
+                update_output(row_id, result[:500])
+                update_feedback(row_id, True)
+            else:
+                _synth.speak("Clipboard was empty or debug failed.")
+                log_brain("DEV_DEBUG failed.")
+                update_feedback(row_id, False)
+
+    except (ConnectionError, TimeoutError) as e:
+        log_brain(f"Dev ops connection error: {e}")
+        _synth.speak("API quota exceeded. Falling back to local keyword engine.")
+        set_exec_state("FAILED", "CONNECTION")
+        update_feedback(row_id, False)
+    except Exception as e:
+        log_brain(f"Dev ops error: {e}")
+        if _is_api_error(e):
+            _synth.speak("API quota exceeded. Falling back to local keyword engine.")
+            set_exec_state("FAILED", "API_QUOTA")
         else:
-            _synth.speak("Clipboard was empty or debug failed.")
-            log_brain("DEV_DEBUG failed.")
-            update_feedback(row_id, False)
+            _synth.speak("Dev operation failed. Please try again.")
+            set_exec_state("FAILED", "DEV_ERROR")
+        update_feedback(row_id, False)
 
 
 def _handle_remember(transcribed_text: str) -> None:
@@ -243,7 +290,6 @@ _OS_TRIGGER_KEYWORDS = (
 def _handle_os_ops(transcribed_text: str, row_id: int) -> None:
     lower = transcribed_text.lower()
 
-    # "upgrade yourself" — open VS Code + speak intent
     if "upgrade yourself" in lower:
         agent = OSAgent()
         _synth.speak("Opening VS Code to apply upgrades.")
@@ -255,7 +301,6 @@ def _handle_os_ops(transcribed_text: str, row_id: int) -> None:
         set_exec_state("SUCCESS", "VS Code opened")
         return
 
-    # "open vs code / vscode" — direct open, no director needed
     if any(k in lower for k in ("open vs code", "open vscode", "open visual studio")):
         agent = OSAgent()
         _synth.speak("Opening VS Code.")
@@ -265,13 +310,17 @@ def _handle_os_ops(transcribed_text: str, row_id: int) -> None:
         set_exec_state("SUCCESS", "VS Code opened")
         return
 
-    # All other OS ops — route through the director loop
     def _run():
-        orch = Orchestrator()
-        executed = orch.run_director_loop(transcribed_text, synth=_synth)
-        update_output(row_id, "; ".join(executed) if executed else "no steps executed")
-        update_feedback(row_id, bool(executed))
-        log_brain(f"OS_OPS director complete: {len(executed)} step(s)")
+        try:
+            orch = Orchestrator()
+            executed = orch.run_director_loop(transcribed_text, synth=_synth)
+            update_output(row_id, "; ".join(executed) if executed else "no steps executed")
+            update_feedback(row_id, bool(executed))
+            log_brain(f"OS_OPS director complete: {len(executed)} step(s)")
+        except Exception as e:
+            log_brain(f"OS_OPS thread error: {e}")
+            set_exec_state("FAILED", "OS_OPS error")
+            update_feedback(row_id, False)
 
     threading.Thread(target=_run, daemon=True, name="AfroDirector").start()
 
@@ -388,7 +437,20 @@ def on_wake_word_detected() -> None:
         return
 
     # ── normal intent routing ─────────────────────────────────────
-    intent_label = _intent_router.route(transcribed_text)
+    try:
+        intent_label = _intent_router.route(transcribed_text)
+    except (ConnectionError, TimeoutError) as e:
+        log_brain(f"Intent routing connection error — keyword fallback: {e}")
+        _synth.speak("API quota exceeded. Falling back to local keyword engine.")
+        intent_label = _keyword_route_fallback(lower)
+    except Exception as e:
+        log_brain(f"Intent routing failed — keyword fallback: {e}")
+        if _is_api_error(e):
+            _synth.speak("API quota exceeded. Falling back to local keyword engine.")
+        else:
+            _synth.speak("API quota exceeded. Falling back to local keyword engine.")
+        intent_label = _keyword_route_fallback(lower)
+
     print(f"Intent: {intent_label}")
     log_brain(f"Intent: {intent_label}")
 
