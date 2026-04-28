@@ -1,6 +1,7 @@
 import sys
 import os
 import time
+import threading
 
 import numpy as np
 import pyaudio
@@ -13,6 +14,7 @@ from voice.transcribe import process_speech
 from core.intent_router import IntentRouter
 from core.system_tray import start_tray
 from agents.process_agent import ProcessAgent
+from agents.dev_agent import DevAgent
 
 SAMPLE_RATE = 16000
 CAPTURE_SECONDS = 5
@@ -113,6 +115,34 @@ def _handle_process_ops(transcribed_text: str) -> None:
             speak("No bloatware processes found running.")
 
 
+def _handle_dev_ops(intent_label: str, transcribed_text: str) -> None:
+    agent = DevAgent()
+
+    if intent_label == "DEV_OPTIMIZE" or "optimize this" in transcribed_text.lower():
+        speak("Analyzing code on clipboard...")
+        result = agent.optimize_code()
+        if result:
+            speak("Code optimized and ready to paste.")
+        else:
+            speak("Clipboard was empty or optimization failed.")
+
+    elif intent_label == "DEV_EXPLAIN":
+        speak("Analyzing code on clipboard...")
+        result = agent.explain_code()
+        if result:
+            speak("Explanation ready. Check your clipboard.")
+        else:
+            speak("Clipboard was empty or explanation failed.")
+
+    elif intent_label == "DEV_DEBUG":
+        speak("Analyzing code on clipboard...")
+        result = agent.debug_code()
+        if result:
+            speak("Debug complete. Fixed code is ready to paste.")
+        else:
+            speak("Clipboard was empty or debug failed.")
+
+
 def on_wake_word_detected() -> None:
     speak("Listening...")
 
@@ -140,6 +170,14 @@ def on_wake_word_detected() -> None:
 
     if intent_label == "PROCESS_OPS":
         _handle_process_ops(transcribed_text)
+    elif intent_label in ("DEV_OPTIMIZE", "DEV_EXPLAIN", "DEV_DEBUG"):
+        # run in thread — LLM calls can take several seconds
+        t = threading.Thread(
+            target=_handle_dev_ops,
+            args=(intent_label, transcribed_text),
+            daemon=True,
+        )
+        t.start()
     else:
         speak(f"Routing to {intent_label}")
 
