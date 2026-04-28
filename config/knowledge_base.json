@@ -1,0 +1,69 @@
+{
+  "tools": [
+    {
+      "name": "create_folder",
+      "arguments": ["path"],
+      "description": "Creates a new folder at the specified filesystem path"
+    },
+    {
+      "name": "delete_item",
+      "arguments": ["path"],
+      "description": "Deletes a file or folder after user confirmation"
+    },
+    {
+      "name": "sort_directory",
+      "arguments": ["path", "criteria"],
+      "description": "Moves directory files into categorized subfolders by type"
+    },
+    {
+      "name": "install_app",
+      "arguments": ["app_name"],
+      "description": "Installs an application via winget or chocolatey package manager"
+    },
+    {
+      "name": "open_vscode",
+      "arguments": ["filepath"],
+      "description": "Launches VS Code optionally opening a specified file or folder"
+    },
+    {
+      "name": "focus_editor",
+      "arguments": [],
+      "description": "Brings the VS Code window to the foreground"
+    },
+    {
+      "name": "type_code",
+      "arguments": ["text"],
+      "description": "Types text into the currently focused VS Code editor"
+    },
+    {
+      "name": "create_file",
+      "arguments": [],
+      "description": "Opens a new untitled file in VS Code with Ctrl+N"
+    },
+    {
+      "name": "save_file",
+      "arguments": [],
+      "description": "Saves the current VS Code file using Ctrl+S"
+    },
+    {
+      "name": "toggle_terminal",
+      "arguments": [],
+      "description": "Toggles the VS Code integrated terminal with Ctrl+backtick"
+    },
+    {
+      "name": "open_and_type",
+      "arguments": ["text", "save"],
+      "description": "Creates new file, types code into it, and optionally saves"
+    },
+    {
+      "name": "talk_back",
+      "arguments": ["message"],
+      "description": "Asks user for clarification or provides feedback"
+    },
+    {
+      "name": "upgrade_yourself",
+      "arguments": ["target_path", "code_snippet"],
+      "description": "Modifies Afro's codebase and triggers self-restart"
+    }
+  ]
+}
