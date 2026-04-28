@@ -9,19 +9,47 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+ACCESS_KEY_PLACEHOLDERS = {
+    "your_access_key_here",
+    "your-picovoice-access-key",
+    "your_picovoice_access_key",
+    "paste_your_picovoice_access_key_here",
+    "replace_me",
+}
+
+
 class VoiceListener:
     def __init__(self):
         self.porcupine = None
         self.audio = None
         self.stream = None
         self.access_key = os.getenv("PICOVOICE_ACCESS_KEY", "").strip()
+        self.wake_engine_status: str = "FALLBACK"
+
+    def _has_configured_access_key(self) -> bool:
+        if not self.access_key:
+            return False
+        return self.access_key.lower() not in ACCESS_KEY_PLACEHOLDERS
 
     def _setup_porcupine(self):
         import pvporcupine
-        self.porcupine = pvporcupine.create(
-            access_key=self.access_key,
-            keywords=["porcupine"],
-        )
+
+        try:
+            self.porcupine = pvporcupine.create(
+                access_key=self.access_key,
+                keywords=["porcupine"],
+            )
+            self.wake_engine_status = "ACTIVE"
+        except pvporcupine.PorcupineInvalidArgumentError as e:
+            print(f"[Porcupine] Invalid argument: {e}")
+            print("Porcupine initialization failed. Switching to fallback mode.")
+            self.wake_engine_status = "FALLBACK"
+            raise
+        except Exception as e:
+            print(f"[Porcupine] Initialization error: {e}")
+            print("Porcupine initialization failed. Switching to fallback mode.")
+            self.wake_engine_status = "FALLBACK"
+            raise
 
     def _setup_stream(self):
         self.audio = pyaudio.PyAudio()
@@ -59,18 +87,47 @@ class VoiceListener:
         if self.porcupine is not None:
             self.porcupine.delete()
 
-    def _fallback_mode(self):
-        import speech_recognition as sr
-
-        print("\nPicovoice AccessKey not found.")
+    def _fallback_mode(self, reason: str = ""):
+        if reason:
+            print(f"\n[Voice disabled] {reason}")
+        print("Set PICOVOICE_ACCESS_KEY in .env to enable wake-word detection.")
         print("Get one at: https://console.picovoice.ai/")
-        print("\n[Fallback] Starting basic speech recognition loop...\n")
+
+        try:
+            import speech_recognition as sr
+        except ImportError:
+            print(
+                "\nSpeechRecognition not installed. Setup Required:\n"
+                "  pip install SpeechRecognition pyaudio"
+            )
+            print("[Fallback] No recognition engine available. Standing by. Press Ctrl+C to exit.")
+            try:
+                while True:
+                    time.sleep(3600)
+            except KeyboardInterrupt:
+                print("\n[Shutdown] KeyboardInterrupt received.")
+            return
+
+        print("[Fallback] SpeechRecognition active. Speak freely — no wake word needed.\n")
 
         recognizer = sr.Recognizer()
-        mic = sr.Microphone()
 
-        with mic as source:
-            recognizer.adjust_for_ambient_noise(source, duration=1)
+        try:
+            mic = sr.Microphone()
+        except OSError as e:
+            print(f"[Fallback] Microphone unavailable: {e}. Standing by.")
+            try:
+                while True:
+                    time.sleep(3600)
+            except KeyboardInterrupt:
+                print("\n[Shutdown] KeyboardInterrupt received.")
+            return
+
+        try:
+            with mic as source:
+                recognizer.adjust_for_ambient_noise(source, duration=1)
+        except Exception as e:
+            print(f"[Fallback] Ambient noise calibration failed: {e}")
 
         while True:
             try:
@@ -79,29 +136,29 @@ class VoiceListener:
                     audio = recognizer.listen(source, timeout=5, phrase_time_limit=10)
                 try:
                     text = recognizer.recognize_google(audio)
-                    print(f"[Detected] {text}")
+                    print(f"[Fallback detected] {text}")
                 except sr.UnknownValueError:
                     pass
                 except sr.RequestError as e:
-                    print(f"[Recognition error] {e}")
+                    print(f"[Fallback recognition error] {e}")
             except sr.WaitTimeoutError:
                 pass
             except OSError as e:
-                print(f"[Microphone error] {e}")
+                print(f"[Fallback microphone error] {e}")
                 time.sleep(1)
+            except KeyboardInterrupt:
+                print("\n[Shutdown] KeyboardInterrupt received.")
+                return
 
     def start(self):
-        if not self.access_key:
-            self._fallback_mode()
+        if not self._has_configured_access_key():
+            self._fallback_mode("Picovoice AccessKey is missing or still a placeholder.")
             return
 
         try:
             self._setup_porcupine()
-        except Exception as e:
-            print(f"[Porcupine init failed] {e}")
-            print("\nPicovoice AccessKey not found.")
-            print("Get one at: https://console.picovoice.ai/")
-            self._fallback_mode()
+        except Exception:
+            self._fallback_mode("Wake-word detection could not initialize.")
             return
 
         try:
