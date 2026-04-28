@@ -15,9 +15,11 @@ from core.intent_router import IntentRouter
 from core.system_tray import start_tray
 from core.dashboard import start_dashboard, log_brain, socketio
 from core.memory import log_command, update_output, update_feedback, remember
+from core.watcher import Watcher
 from agents.process_agent import ProcessAgent
 from agents.dev_agent import DevAgent
 from agents.meta_agent import start_meta_agent, run_review_on_command
+from agents.scheduler_agent import SchedulerAgent
 
 SAMPLE_RATE = 16000
 CAPTURE_SECONDS = 5
@@ -25,6 +27,8 @@ CHUNK = 1024
 
 _synth = VoiceSynthesizer()
 _intent_router = IntentRouter()
+_watcher = Watcher(synth=_synth)
+_scheduler = SchedulerAgent(synth=_synth)
 
 
 @socketio.on("set_mute")
@@ -242,6 +246,16 @@ def on_wake_word_detected() -> None:
         update_feedback(row_id, True)
         return
 
+    if lower.startswith("remind me") or "remind me to" in lower or "remind me about" in lower:
+        row_id = log_command(transcribed_text, "REMINDER")
+        threading.Thread(
+            target=_scheduler.handle_voice_command,
+            args=(transcribed_text,),
+            daemon=True,
+        ).start()
+        update_feedback(row_id, True)
+        return
+
     if "review logs" in lower or "run meta review" in lower:
         row_id = log_command(transcribed_text, "META_REVIEW")
         _synth.speak("Running system review. This may take a moment.")
@@ -316,6 +330,12 @@ def main() -> None:
 
     start_meta_agent()
     print("Meta-agent scheduled (24h review cycle).")
+
+    _watcher.start()
+    print("Proactive watcher started.")
+
+    _scheduler.run_loop()
+    print("Scheduler agent started.")
 
     print("Initializing voice system...")
     listener = AfroListener(callback=on_wake_word_detected)
