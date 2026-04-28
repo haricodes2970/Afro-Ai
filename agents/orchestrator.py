@@ -50,70 +50,105 @@ STDLIB_SKIP = {
 _USERNAME = os.environ.get("USERNAME", os.environ.get("USER", "User"))
 _HOME     = os.path.expanduser("~").replace("\\", "/")
 
-DIRECTOR_PROMPT = """\
-[ROLE]
-You are the Director Agent for Afro, a Windows OS Automator.
-Convert natural language voice commands into structured, executable actions.
+# ── Knowledge Base ────────────────────────────────────────────────────────────
 
-[AVAILABLE TOOLS]
-1. create_folder(path)
-2. delete_item(path)
-3. sort_directory(path, criteria)
-4. install_app(app_name)
-5. open_vscode(filepath)
-6. type_code(text)
-7. talk_back(message)
+_KB_PATH = os.path.normpath(
+    os.path.join(os.path.dirname(__file__), "..", "config", "knowledge_base.json")
+)
 
-[STRICT RULES]
-- OUTPUT ONLY VALID JSON — no markdown, no explanations, no code fences
-- Always return a JSON ARRAY (even for a single action)
-- Each item must have "tool" and "args" keys
-- NEVER hallucinate tools or parameters
-- Use safe Windows paths; default home directory: {home}
-
-[SAFETY]
-- For destructive actions (delete_item): only include if user explicitly asked
-- If the command is ambiguous or missing details, use talk_back to ask for clarification
-
-[FORMAT]
-[
-  {{
-    "tool": "<tool_name>",
-    "args": {{ "<param>": "<value>" }}
-  }}
+_FALLBACK_TOOLS = [
+    {"name": "create_folder",  "arguments": ["path"],                          "description": "Creates a new folder at the specified filesystem path"},
+    {"name": "delete_item",    "arguments": ["path"],                          "description": "Deletes a file or folder after user confirmation"},
+    {"name": "sort_directory", "arguments": ["path", "criteria"],              "description": "Moves directory files into categorized subfolders by type"},
+    {"name": "install_app",    "arguments": ["app_name"],                      "description": "Installs an application via winget or chocolatey package manager"},
+    {"name": "open_vscode",    "arguments": ["filepath"],                      "description": "Launches VS Code optionally opening a specified file or folder"},
+    {"name": "focus_editor",   "arguments": [],                                "description": "Brings the VS Code window to the foreground"},
+    {"name": "type_code",      "arguments": ["text"],                          "description": "Types text into the currently focused VS Code editor"},
+    {"name": "talk_back",      "arguments": ["message"],                       "description": "Asks user for clarification or provides feedback"},
+    {"name": "upgrade_yourself","arguments": ["target_path", "code_snippet"],  "description": "Modifies Afro's codebase and triggers self-restart"},
 ]
 
-[INPUT]
-User Command: {command}
 
-[OUTPUT]
-"""
+def _load_knowledge_base() -> list[dict]:
+    try:
+        with open(_KB_PATH, "r", encoding="utf-8") as f:
+            tools = json.load(f).get("tools", [])
+        print(f"[Orchestrator] Loaded {len(tools)} tool(s) from knowledge_base.json")
+        return tools
+    except Exception as e:
+        print(f"[Orchestrator] knowledge_base.json load failed — using fallback: {e}", file=sys.stderr)
+        return _FALLBACK_TOOLS
 
-# Allowed tools — talk_back is handled before OSAgent dispatch
-_ALLOWED_TOOLS = {
-    "sort_directory",
-    "create_folder",
-    "delete_item",
-    "install_app",
-    "open_vscode",
-    "type_code",
-    "talk_back",
-}
 
-# Arg key → positional order for each OSAgent method
+_TOOLS_KB   = _load_knowledge_base()
+_TOOLS_JSON = json.dumps(_TOOLS_KB, indent=2)
+
+# Braces in the embedded JSON must be escaped so DIRECTOR_PROMPT.format() works.
+_TOOLS_JSON_ESC = _TOOLS_JSON.replace("{", "{{").replace("}", "}}")
+
+# Whitelist derived from the knowledge base — no hardcoded names.
+_ALLOWED_TOOLS: set[str] = {t["name"] for t in _TOOLS_KB}
+
+# ── Director Prompt ───────────────────────────────────────────────────────────
+
+DIRECTOR_PROMPT = (
+    "[ROLE]\n"
+    "You are the Director Agent for Afro, a Windows OS Automator.\n"
+    "Convert natural language voice commands into structured, executable actions.\n"
+    "\n"
+    "[AVAILABLE TOOLS]\n"
+    "You have access to the following tools only:\n"
+    + _TOOLS_JSON_ESC +
+    "\n"
+    "Only use tools listed above. Do not invent or reference any other tool.\n"
+    "\n"
+    "[STRICT RULES]\n"
+    "- OUTPUT ONLY VALID JSON — no markdown, no explanations, no code fences\n"
+    "- Always return a JSON ARRAY (even for a single action)\n"
+    "- Each item MUST have \"tool\" and \"args\" keys\n"
+    "- \"tool\" MUST be one of the names in [AVAILABLE TOOLS]\n"
+    "- \"args\" keys MUST match the arguments listed for that tool\n"
+    "- NEVER hallucinate tools or parameters\n"
+    "- Use safe Windows paths; default home directory: {home}\n"
+    "\n"
+    "[SAFETY]\n"
+    "- For destructive actions (delete_item): only include if user explicitly asked\n"
+    "- If the command is ambiguous or missing details, use talk_back to ask for clarification\n"
+    "\n"
+    "[FORMAT]\n"
+    "[\n"
+    "  {{\n"
+    "    \"tool\": \"<tool_name>\",\n"
+    "    \"args\": {{ \"<param>\": \"<value>\" }}\n"
+    "  }}\n"
+    "]\n"
+    "\n"
+    "[INPUT]\n"
+    "User Command: {command}\n"
+    "\n"
+    "[OUTPUT]\n"
+)
+
+# ── Arg order for positional dispatch ────────────────────────────────────────
+
 _ARG_ORDER = {
-    "sort_directory": ["path", "criteria"],
-    "create_folder":  ["path"],
-    "delete_item":    ["path"],
-    "install_app":    ["app_name"],
-    "open_vscode":    ["filepath"],
-    "type_code":      ["text"],
+    "sort_directory":  ["path", "criteria"],
+    "create_folder":   ["path"],
+    "delete_item":     ["path"],
+    "install_app":     ["app_name"],
+    "open_vscode":     ["filepath"],
+    "focus_editor":    [],
+    "type_code":       ["text"],
+    "create_file":     [],
+    "save_file":       [],
+    "toggle_terminal": [],
+    "open_and_type":   ["text", "save"],
+    "upgrade_yourself":["target_path", "code_snippet"],
 }
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
 
 # Tracks the error type from the most recent _call_llm() invocation.
-# Values: "API_QUOTA" | "CONNECTION" | None
 _last_api_error: str | None = None
 
 
@@ -158,7 +193,7 @@ def _parse_steps(llm_output: str) -> list[dict]:
         tool = item.get("tool", "").strip()
         args = item.get("args", {})
         if tool not in _ALLOWED_TOOLS:
-            print(f"[Director] Blocked disallowed tool: {tool!r}")
+            print(f"[Director] Blocked unknown tool: {tool!r} (not in knowledge_base)")
             continue
         if not isinstance(args, dict):
             args = {}
@@ -339,12 +374,13 @@ class Orchestrator:
         executed: list[str] = []
 
         method_map = {
-            "sort_directory": agent.sort_directory,
-            "create_folder":  agent.create_folder,
-            "delete_item":    agent.delete_item,
-            "install_app":    agent.install_app,
-            "open_vscode":    agent.open_vscode,
-            "type_code":      agent.type_code,
+            "sort_directory":  agent.sort_directory,
+            "create_folder":   agent.create_folder,
+            "delete_item":     agent.delete_item,
+            "install_app":     agent.install_app,
+            "open_vscode":     agent.open_vscode,
+            "focus_editor":    agent.focus_editor,
+            "type_code":       agent.type_code,
         }
 
         for step in steps:
@@ -364,7 +400,7 @@ class Orchestrator:
 
             method = method_map.get(tool)
             if method is None:
-                print(f"[Director] No method for tool: {tool}", file=sys.stderr)
+                print(f"[Director] No dispatch method for tool: {tool!r}", file=sys.stderr)
                 continue
 
             arg_order = _ARG_ORDER.get(tool, [])
