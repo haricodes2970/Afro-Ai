@@ -1,7 +1,13 @@
-import sys
 import os
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
+
+import sys
 import time
 import threading
+import warnings
+warnings.filterwarnings("ignore")
+
 from datetime import datetime
 
 import numpy as np
@@ -32,9 +38,10 @@ _intent_router = IntentRouter()
 _watcher       = Watcher(synth=_synth)
 _scheduler     = SchedulerAgent(synth=_synth)
 
-deep_focus_active   = False
-_focus_agent: ProcessAgent | None = None
+deep_focus_active              = False
+_focus_agent: ProcessAgent | None    = None
 _focus_thread: threading.Thread | None = None
+_listener: "AfroListener | None"     = None
 
 
 @socketio.on("set_mute")
@@ -51,18 +58,18 @@ def _on_set_speed(data):
 
 
 PROCESS_OP_KEYWORDS = {
-    "status": "STATUS",
-    "kill": "KILL",
-    "terminate": "KILL",
-    "stop": "KILL",
+    "status":   "STATUS",
+    "kill":     "KILL",
+    "terminate":"KILL",
+    "stop":     "KILL",
     "optimize": "OPTIMIZE",
     "clean up": "OPTIMIZE",
-    "cleanup": "OPTIMIZE",
+    "cleanup":  "OPTIMIZE",
 }
 
 
 def capture_audio() -> bytes:
-    audio = pyaudio.PyAudio()
+    audio  = pyaudio.PyAudio()
     stream = None
     frames = []
 
@@ -85,9 +92,15 @@ def capture_audio() -> bytes:
         print(f"[Microphone error] {e}")
     finally:
         if stream is not None:
-            stream.stop_stream()
-            stream.close()
-        audio.terminate()
+            try:
+                stream.stop_stream()
+                stream.close()
+            except Exception:
+                pass
+        try:
+            audio.terminate()
+        except Exception:
+            pass
 
     return b"".join(frames)
 
@@ -193,9 +206,9 @@ def _handle_dev_ops(intent_label: str, transcribed_text: str, row_id: int) -> No
 
 
 def _handle_remember(transcribed_text: str) -> None:
-    lower = transcribed_text.lower()
+    lower  = transcribed_text.lower()
     marker = "remember this"
-    idx = lower.find(marker)
+    idx    = lower.find(marker)
 
     if idx != -1:
         content = transcribed_text[idx + len(marker):].strip(" ,.:")
@@ -221,7 +234,7 @@ def _activate_deep_focus() -> None:
     if deep_focus_active:
         return
     deep_focus_active = True
-    _focus_agent = ProcessAgent()
+    _focus_agent  = ProcessAgent()
     start_hud(focus_start=datetime.now())
     _focus_thread = threading.Thread(
         target=_focus_agent.enforce_deep_focus,
@@ -356,13 +369,13 @@ class AfroListener(VoiceListener):
 
     def _detection_loop(self):
         print("Listening for wake word...")
-        while True:
+        while not self._shutdown:
             try:
                 raw = self.stream.read(FRAME_LENGTH, exception_on_overflow=False)
                 frame = np.frombuffer(raw, dtype=np.int16)
                 prediction = self.oww_model.predict(frame)
 
-                for model_name, score in prediction.items():
+                for _model_name, score in prediction.items():
                     if score >= DETECTION_THRESHOLD:
                         print("\n=========================")
                         print("AFRO IS ACTIVE")
@@ -372,11 +385,30 @@ class AfroListener(VoiceListener):
                         break
 
             except OSError as e:
+                if self._shutdown:
+                    break
                 print(f"[Audio error] {e}")
                 time.sleep(0.1)
 
 
+def _shutdown_all(listener: "AfroListener | None" = None) -> None:
+    print("\nAfro shutting down...")
+    if deep_focus_active:
+        try:
+            _deactivate_deep_focus()
+        except Exception:
+            pass
+    if listener is not None:
+        try:
+            listener._shutdown = True
+            listener._cleanup()
+        except Exception:
+            pass
+
+
 def main() -> None:
+    global _listener
+
     print("Project Afro Starting...")
 
     start_tray()
@@ -396,15 +428,22 @@ def main() -> None:
     print("Scheduler agent started.")
 
     print("Initializing voice system...")
-    listener = AfroListener(callback=on_wake_word_detected)
+    _listener = AfroListener(callback=on_wake_word_detected)
 
     try:
-        listener.start()
+        _listener.start()
     except KeyboardInterrupt:
-        print("\n[Shutdown] KeyboardInterrupt received.")
-        if deep_focus_active:
-            _deactivate_deep_focus()
+        pass
+    finally:
+        _shutdown_all(_listener)
+        os._exit(0)
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        print(f"[Fatal] {e}")
+        os._exit(1)
