@@ -11,6 +11,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from voice.listener import VoiceListener
 from voice.transcribe import process_speech
 from core.intent_router import IntentRouter
+from core.system_tray import start_tray
+from agents.process_agent import ProcessAgent
 
 SAMPLE_RATE = 16000
 CAPTURE_SECONDS = 5
@@ -18,6 +20,16 @@ CHUNK = 1024
 
 _tts_engine = pyttsx3.init()
 _intent_router = IntentRouter()
+
+PROCESS_OP_KEYWORDS = {
+    "status": "STATUS",
+    "kill": "KILL",
+    "terminate": "KILL",
+    "stop": "KILL",
+    "optimize": "OPTIMIZE",
+    "clean up": "OPTIMIZE",
+    "cleanup": "OPTIMIZE",
+}
 
 
 def speak(text: str) -> None:
@@ -56,6 +68,51 @@ def capture_audio() -> bytes:
     return b"".join(frames)
 
 
+def _extract_process_op(text: str) -> tuple[str, str]:
+    lower = text.lower()
+    op = "STATUS"
+    for keyword, operation in PROCESS_OP_KEYWORDS.items():
+        if keyword in lower:
+            op = operation
+            break
+
+    process_name = ""
+    if op == "KILL":
+        words = lower.split()
+        for i, word in enumerate(words):
+            if word in ("kill", "terminate", "stop") and i + 1 < len(words):
+                process_name = words[i + 1]
+                break
+
+    return op, process_name
+
+
+def _handle_process_ops(transcribed_text: str) -> None:
+    agent = ProcessAgent()
+    op, process_name = _extract_process_op(transcribed_text)
+
+    if op == "STATUS":
+        agent.status()
+        speak("Here are the top running processes.")
+
+    elif op == "KILL":
+        if not process_name:
+            speak("Please specify a process name to kill.")
+            return
+        freed_mb = agent.kill(process_name)
+        if freed_mb > 0:
+            speak(f"Process terminated. Freed {freed_mb:.0f} MB RAM")
+        else:
+            speak(f"Could not find process {process_name}")
+
+    elif op == "OPTIMIZE":
+        freed_mb = agent.optimize()
+        if freed_mb > 0:
+            speak(f"Optimization complete. Freed {freed_mb:.0f} MB RAM")
+        else:
+            speak("No bloatware processes found running.")
+
+
 def on_wake_word_detected() -> None:
     speak("Listening...")
 
@@ -80,7 +137,11 @@ def on_wake_word_detected() -> None:
 
     intent_label = _intent_router.route(transcribed_text)
     print(f"Intent: {intent_label}")
-    speak(f"Routing to {intent_label}")
+
+    if intent_label == "PROCESS_OPS":
+        _handle_process_ops(transcribed_text)
+    else:
+        speak(f"Routing to {intent_label}")
 
 
 class AfroListener(VoiceListener):
@@ -111,8 +172,11 @@ class AfroListener(VoiceListener):
 
 def main() -> None:
     print("Project Afro Starting...")
-    print("Initializing voice system...")
 
+    start_tray()
+    print("System tray initialized.")
+
+    print("Initializing voice system...")
     listener = AfroListener(callback=on_wake_word_detected)
 
     try:
