@@ -57,6 +57,18 @@
       </div>
     </div>
 
+    <!-- Brain Feed -->
+    <div class="card feed-card">
+      <h3>⟳ Brain Feed</h3>
+      <ul id="brainFeed"></ul>
+    </div>
+
+    <!-- Clipboard Preview -->
+    <div class="card clip-card">
+      <h3>⎘ Clipboard</h3>
+      <pre id="clipPreview"></pre>
+    </div>
+
     <!-- Focus Tracker -->
     <div class="card focus-card">
       <h3>⊙ Current Focus</h3>
@@ -83,26 +95,25 @@
       </div>
     </div>
 
-    <!-- Brain Feed -->
-    <div class="card feed-card">
-      <h3>⟳ Brain Feed</h3>
-      <ul id="brainFeed"></ul>
-    </div>
-
-    <!-- Clipboard Preview -->
-    <div class="card clip-card">
-      <h3>⎘ Clipboard</h3>
-      <pre id="clipPreview"></pre>
-    </div>
-
-    <!-- Agent Action Indicator -->
-    <div class="card action-card" id="actionCard">
-      <h3>⚡ Agent Action</h3>
-      <div class="action-status-row">
-        <span class="action-status-dot" id="actionDot"></span>
-        <span class="action-status-label" id="actionStatus">IDLE</span>
+    <!-- Aura Action Card -->
+    <div class="card action-card state-idle" id="action-card">
+      <div class="aura-header">
+        <span class="aura-label">⚡ Agent Action</span>
+        <span class="aura-state-badge" id="auraStateBadge">IDLE</span>
       </div>
-      <div class="action-text" id="actionText">—</div>
+      <div class="aura-action-text" id="auraActionText">
+        Current Action: <span id="currentActionSpan">—</span>
+      </div>
+      <div class="aura-dot-row">
+        <span class="aura-dot" id="auraDot"></span>
+        <span class="aura-dot-label" id="auraDotLabel">Awaiting command</span>
+      </div>
+    </div>
+
+    <!-- Action Log -->
+    <div class="card action-log-card">
+      <h3>▸ Action Log</h3>
+      <div id="action-log"></div>
     </div>
 
     <!-- Voice Controls -->
@@ -147,6 +158,7 @@
       document.getElementById("statusLabel").textContent = "Disconnected";
     });
 
+    // ── Gauge helpers ─────────────────────────────────────────────
     function setArc(arcId, valId, pct) {
       const circ = 314;
       const used = (pct / 100) * circ;
@@ -161,16 +173,70 @@
     function setBar(fillId, valId, pct, status) {
       const fill = document.getElementById(fillId);
       const val  = document.getElementById(valId);
-      fill.style.width  = Math.min(pct, 100).toFixed(1) + "%";
+      fill.style.width      = Math.min(pct, 100).toFixed(1) + "%";
       fill.style.background = STATUS_COLOR[status] || STATUS_COLOR.NORMAL;
-      val.textContent = pct.toFixed(1) + "%";
+      val.textContent       = pct.toFixed(1) + "%";
     }
 
+    // ── Action card (Aura) ────────────────────────────────────────
+    const _AURA_LABELS = {
+      IDLE:    "Awaiting command",
+      RUNNING: "Processing...",
+      FAILED:  "Error detected",
+      SUCCESS: "Completed",
+    };
+
+    let _lastAction = "";
+
+    function updateActionCard(status, action) {
+      const card   = document.getElementById("action-card");
+      const badge  = document.getElementById("auraStateBadge");
+      const span   = document.getElementById("currentActionSpan");
+      const dot    = document.getElementById("auraDot");
+      const dlabel = document.getElementById("auraDotLabel");
+
+      // Normalise: treat SUCCESS as IDLE visually
+      const auraState = (status === "SUCCESS") ? "IDLE" : status;
+
+      card.className = `card action-card state-${auraState.toLowerCase()}`;
+      badge.textContent  = status;
+      span.textContent   = action || "—";
+      dlabel.textContent = _AURA_LABELS[status] || status;
+
+      dot.className = "aura-dot" + (status === "RUNNING" ? " aura-dot-pulse" : "");
+    }
+
+    // ── Action log ────────────────────────────────────────────────
+    const _LOG_MAX = 100;
+    const _logEl   = document.getElementById("action-log");
+
+    function _ts() {
+      const d = new Date();
+      return d.toTimeString().slice(0, 8);
+    }
+
+    function appendLog(text, level) {
+      const line = document.createElement("div");
+      line.className = "log-line" + (level ? ` log-${level}` : "");
+      line.textContent = `[${_ts()}] ${text}`;
+      _logEl.appendChild(line);
+
+      // Trim buffer
+      while (_logEl.children.length > _LOG_MAX) {
+        _logEl.removeChild(_logEl.firstChild);
+      }
+
+      // Auto-scroll
+      _logEl.scrollTop = _logEl.scrollHeight;
+    }
+
+    // ── Telemetry handler ─────────────────────────────────────────
     socket.on("telemetry", (data) => {
       setArc("cpuArc", "cpuVal", data.cpu);
       setArc("ramArc", "ramVal", data.ram);
       setArc("gpuArc", "gpuVal", data.gpu);
 
+      // Brain feed
       const feed = document.getElementById("brainFeed");
       feed.innerHTML = "";
       (data.brain_feed || []).slice().reverse().forEach(msg => {
@@ -179,47 +245,51 @@
         feed.appendChild(li);
       });
 
-      const clip = document.getElementById("clipPreview");
-      clip.textContent = data.clipboard_preview || "—";
+      // Clipboard
+      document.getElementById("clipPreview").textContent =
+        data.clipboard_preview || "—";
 
       // Focus tracker
-      const status = data.health_status || "NORMAL";
-      const win    = data.active_window || "—";
-      const dur    = data.focus_duration_minutes || 0;
+      const healthStatus = data.health_status || "NORMAL";
+      const win          = data.active_window || "—";
+      const dur          = data.focus_duration_minutes || 0;
 
       document.getElementById("focusWindow").textContent =
         win.length > 60 ? win.slice(0, 57) + "…" : win;
       document.getElementById("focusDuration").textContent = dur + " min";
 
       const badge = document.getElementById("healthBadge");
-      badge.textContent = status;
-      badge.dataset.status = status;
-      badge.style.color = STATUS_COLOR[status] || STATUS_COLOR.NORMAL;
-      badge.style.borderColor = STATUS_COLOR[status] || STATUS_COLOR.NORMAL;
+      badge.textContent    = healthStatus;
+      badge.dataset.status = healthStatus;
+      badge.style.color    = STATUS_COLOR[healthStatus] || STATUS_COLOR.NORMAL;
+      badge.style.borderColor = STATUS_COLOR[healthStatus] || STATUS_COLOR.NORMAL;
 
-      setBar("cpuBar",  "cpuBarVal",  data.cpu, status);
-      setBar("gpuBar",  "gpuBarVal",  data.gpu, status);
+      setBar("cpuBar", "cpuBarVal", data.cpu, healthStatus);
+      setBar("gpuBar", "gpuBarVal", data.gpu, healthStatus);
 
-      // Agent action indicator
-      const execStatus  = data.execution_status || "IDLE";
-      const actionText  = data.current_action   || "—";
-      const actionCard  = document.getElementById("actionCard");
-      const actionDot   = document.getElementById("actionDot");
-      const actionLbl   = document.getElementById("actionStatus");
-      const actionTxt   = document.getElementById("actionText");
+      // Aura action card
+      const execStatus = data.execution_status || "IDLE";
+      const currAction = data.current_action   || "—";
 
-      actionLbl.textContent = execStatus;
-      actionTxt.textContent = actionText;
+      updateActionCard(execStatus, currAction);
 
-      actionCard.classList.remove("exec-idle", "exec-running", "exec-success", "exec-failed");
-      actionDot.classList.remove("pulse");
+      // Append to action log when action changes
+      if (currAction !== "—" && currAction !== _lastAction) {
+        const lvl = execStatus === "FAILED"  ? "error"
+                  : execStatus === "RUNNING" ? "run"
+                  : execStatus === "SUCCESS" ? "ok"
+                  : "info";
+        appendLog(`[${execStatus}] ${currAction}`, lvl);
+        _lastAction = currAction;
+      }
 
-      const cls = "exec-" + execStatus.toLowerCase();
-      actionCard.classList.add(cls);
-      if (execStatus === "RUNNING") actionDot.classList.add("pulse");
+      // Server-pushed log lines (if backend sends them)
+      if (Array.isArray(data.action_log)) {
+        data.action_log.forEach(line => appendLog(line, "info"));
+      }
     });
 
-    // Mute toggle
+    // ── Voice controls ────────────────────────────────────────────
     const muteToggle = document.getElementById("muteToggle");
     const muteHint   = document.getElementById("muteHint");
     muteToggle.addEventListener("change", () => {
@@ -228,7 +298,6 @@
       socket.emit("set_mute", { muted });
     });
 
-    // Speed slider
     const speedSlider = document.getElementById("speedSlider");
     const speedHint   = document.getElementById("speedHint");
     speedSlider.addEventListener("input", () => {
