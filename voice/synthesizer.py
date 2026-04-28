@@ -74,6 +74,20 @@ class VoiceSynthesizer:
                 except Exception:
                     pass
 
+    def stop(self) -> None:
+        """Best-effort interrupt of current playback (cloud or local)."""
+        try:
+            import pygame
+            if pygame.mixer.get_init():
+                pygame.mixer.stop()
+        except Exception:
+            pass
+        if self._local_engine is not None:
+            try:
+                self._local_engine.stop()
+            except Exception:
+                pass
+
     def mute(self, is_muted: bool) -> None:
         with self._lock:
             self._muted = bool(is_muted)
