@@ -31,20 +31,71 @@ from agents.scheduler_agent import SchedulerAgent
 from agents.orchestrator import Orchestrator
 from agents.os_agent import OSAgent
 
-SAMPLE_RATE = 16000
+# ── PyQt6 / CockpitUI (optional) ─────────────────────────────────────────────
+try:
+    from PyQt6.QtCore import QObject, pyqtSignal
+    from core.cockpit_ui import launch_cockpit
+    _QT_AVAILABLE = True
+except ImportError:
+    _QT_AVAILABLE = False
+
+SAMPLE_RATE     = 16000
 CAPTURE_SECONDS = 5
-CHUNK = 1024
+CHUNK           = 1024
 
 _synth         = VoiceSynthesizer()
 _intent_router = IntentRouter()
 _watcher       = Watcher(synth=_synth)
 _scheduler     = SchedulerAgent(synth=_synth)
 
-deep_focus_active                   = False
-_focus_agent: ProcessAgent | None   = None
+deep_focus_active                      = False
+_focus_agent: ProcessAgent | None      = None
 _focus_thread: threading.Thread | None = None
-_listener: "AfroListener | None"    = None
+_listener: "AfroListener | None"       = None
 
+# CockpitUI handles (populated in main() when Qt is available)
+_qt_app  = None
+_cockpit = None
+_bridge: "object | None" = None   # _UiBridge instance
+
+
+# ── UI bridge (Qt cross-thread signals) ──────────────────────────────────────
+
+if _QT_AVAILABLE:
+    class _UiBridge(QObject):
+        speaking_changed    = pyqtSignal(bool)
+        log_message         = pyqtSignal(str)
+        agent_state_changed = pyqtSignal(str, str)
+
+
+# ── Speak / log helpers ───────────────────────────────────────────────────────
+
+def _speak(msg: str) -> None:
+    """Speak via synthesizer and update CockpitUI orb if available."""
+    if _bridge is not None:
+        try:
+            _bridge.speaking_changed.emit(True)
+        except Exception:
+            pass
+    _synth.speak(msg)
+    if _bridge is not None:
+        try:
+            _bridge.speaking_changed.emit(False)
+        except Exception:
+            pass
+
+
+def _ui_log(msg: str) -> None:
+    """Log to brain DB and CockpitUI log panel if available."""
+    log_brain(msg)
+    if _bridge is not None:
+        try:
+            _bridge.log_message.emit(msg)
+        except Exception:
+            pass
+
+
+# ── SocketIO handlers ─────────────────────────────────────────────────────────
 
 @socketio.on("set_mute")
 def _on_set_mute(data):
@@ -58,6 +109,8 @@ def _on_set_speed(data):
     except (TypeError, ValueError):
         pass
 
+
+# ── Process-ops helpers ───────────────────────────────────────────────────────
 
 PROCESS_OP_KEYWORDS = {
     "status":    "STATUS",
@@ -127,7 +180,6 @@ def _extract_process_op(text: str) -> tuple[str, str]:
 
 
 def _keyword_route_fallback(lower: str) -> str:
-    """Keyword-only intent classifier — used when LLM routing fails."""
     if any(k in lower for k in ("optimize", "refactor", "improve", "clean up code")):
         return "DEV_OPTIMIZE"
     if any(k in lower for k in ("explain", "what does", "how does", "what is")):
@@ -144,7 +196,7 @@ def _keyword_route_fallback(lower: str) -> str:
 
 
 def _is_api_error(e: Exception) -> bool:
-    err = str(e).lower()
+    err  = str(e).lower()
     code = getattr(e, "status_code", None) or getattr(e, "code", None)
     return (
         code == 429
@@ -157,38 +209,40 @@ def _is_api_error(e: Exception) -> bool:
     )
 
 
+# ── Command handlers ──────────────────────────────────────────────────────────
+
 def _handle_process_ops(transcribed_text: str, row_id: int) -> None:
     agent = ProcessAgent()
     op, process_name = _extract_process_op(transcribed_text)
 
     if op == "STATUS":
         agent.status()
-        _synth.speak("Here are the top running processes.")
+        _speak("Here are the top running processes.")
         update_output(row_id, "STATUS displayed")
         update_feedback(row_id, True)
 
     elif op == "KILL":
         if not process_name:
-            _synth.speak("Please specify a process name to kill.")
+            _speak("Please specify a process name to kill.")
             update_feedback(row_id, False)
             return
         freed_mb = agent.kill(process_name)
         if freed_mb > 0:
-            _synth.speak(f"Process terminated. Freed {freed_mb:.0f} MB RAM")
+            _speak(f"Process terminated. Freed {freed_mb:.0f} MB RAM")
             update_output(row_id, f"Killed {process_name}, freed {freed_mb:.1f} MB")
             update_feedback(row_id, True)
         else:
-            _synth.speak(f"Could not find process {process_name}")
+            _speak(f"Could not find process {process_name}")
             update_feedback(row_id, False)
 
     elif op == "OPTIMIZE":
         freed_mb = agent.optimize()
         if freed_mb > 0:
-            _synth.speak(f"Optimization complete. Freed {freed_mb:.0f} MB RAM")
+            _speak(f"Optimization complete. Freed {freed_mb:.0f} MB RAM")
             update_output(row_id, f"Freed {freed_mb:.1f} MB")
             update_feedback(row_id, True)
         else:
-            _synth.speak("No bloatware processes found running.")
+            _speak("No bloatware processes found running.")
             update_feedback(row_id, False)
 
 
@@ -197,59 +251,59 @@ def _handle_dev_ops(intent_label: str, transcribed_text: str, row_id: int) -> No
 
     try:
         if intent_label == "DEV_OPTIMIZE" or "optimize this" in transcribed_text.lower():
-            _synth.speak("Analyzing code on clipboard...")
-            log_brain(f"DEV_OPTIMIZE triggered: {transcribed_text[:60]}")
+            _speak("Analyzing code on clipboard...")
+            _ui_log(f"DEV_OPTIMIZE triggered: {transcribed_text[:60]}")
             result = agent.optimize_code()
             if result:
-                _synth.speak("Code optimized and ready to paste.")
-                log_brain("DEV_OPTIMIZE complete.")
+                _speak("Code optimized and ready to paste.")
+                _ui_log("DEV_OPTIMIZE complete.")
                 update_output(row_id, result[:500])
                 update_feedback(row_id, True)
             else:
-                _synth.speak("Clipboard was empty or optimization failed.")
-                log_brain("DEV_OPTIMIZE failed — empty clipboard or LLM error.")
+                _speak("Clipboard was empty or optimization failed.")
+                _ui_log("DEV_OPTIMIZE failed — empty clipboard or LLM error.")
                 update_feedback(row_id, False)
 
         elif intent_label == "DEV_EXPLAIN":
-            _synth.speak("Analyzing code on clipboard...")
-            log_brain(f"DEV_EXPLAIN triggered: {transcribed_text[:60]}")
+            _speak("Analyzing code on clipboard...")
+            _ui_log(f"DEV_EXPLAIN triggered: {transcribed_text[:60]}")
             result = agent.explain_code()
             if result:
-                _synth.speak("Explanation ready. Check your clipboard.")
-                log_brain("DEV_EXPLAIN complete.")
+                _speak("Explanation ready. Check your clipboard.")
+                _ui_log("DEV_EXPLAIN complete.")
                 update_output(row_id, result[:500])
                 update_feedback(row_id, True)
             else:
-                _synth.speak("Clipboard was empty or explanation failed.")
-                log_brain("DEV_EXPLAIN failed.")
+                _speak("Clipboard was empty or explanation failed.")
+                _ui_log("DEV_EXPLAIN failed.")
                 update_feedback(row_id, False)
 
         elif intent_label == "DEV_DEBUG":
-            _synth.speak("Analyzing code on clipboard...")
-            log_brain(f"DEV_DEBUG triggered: {transcribed_text[:60]}")
+            _speak("Analyzing code on clipboard...")
+            _ui_log(f"DEV_DEBUG triggered: {transcribed_text[:60]}")
             result = agent.debug_code()
             if result:
-                _synth.speak("Debug complete. Fixed code is ready to paste.")
-                log_brain("DEV_DEBUG complete.")
+                _speak("Debug complete. Fixed code is ready to paste.")
+                _ui_log("DEV_DEBUG complete.")
                 update_output(row_id, result[:500])
                 update_feedback(row_id, True)
             else:
-                _synth.speak("Clipboard was empty or debug failed.")
-                log_brain("DEV_DEBUG failed.")
+                _speak("Clipboard was empty or debug failed.")
+                _ui_log("DEV_DEBUG failed.")
                 update_feedback(row_id, False)
 
     except (ConnectionError, TimeoutError) as e:
-        log_brain(f"Dev ops connection error: {e}")
-        _synth.speak("API quota exceeded. Falling back to local keyword engine.")
+        _ui_log(f"Dev ops connection error: {e}")
+        _speak("API quota exceeded. Falling back to local keyword engine.")
         set_exec_state("FAILED", "CONNECTION")
         update_feedback(row_id, False)
     except Exception as e:
-        log_brain(f"Dev ops error: {e}")
+        _ui_log(f"Dev ops error: {e}")
         if _is_api_error(e):
-            _synth.speak("API quota exceeded. Falling back to local keyword engine.")
+            _speak("API quota exceeded. Falling back to local keyword engine.")
             set_exec_state("FAILED", "API_QUOTA")
         else:
-            _synth.speak("Dev operation failed. Please try again.")
+            _speak("Dev operation failed. Please try again.")
             set_exec_state("FAILED", "DEV_ERROR")
         update_feedback(row_id, False)
 
@@ -265,17 +319,17 @@ def _handle_remember(transcribed_text: str) -> None:
         content = transcribed_text.strip()
 
     if not content:
-        _synth.speak("What should I remember? Please say the content after 'remember this'.")
+        _speak("What should I remember? Please say the content after 'remember this'.")
         return
 
     stored = remember(content)
     if stored:
-        _synth.speak("Got it. I'll remember that.")
-        log_brain(f"Remembered: {content[:80]}")
+        _speak("Got it. I'll remember that.")
+        _ui_log(f"Remembered: {content[:80]}")
         print(f"[Memory] Stored: {content}")
     else:
-        _synth.speak("I already have that in memory.")
-        log_brain(f"Already remembered: {content[:80]}")
+        _speak("I already have that in memory.")
+        _ui_log(f"Already remembered: {content[:80]}")
 
 
 _OS_TRIGGER_KEYWORDS = (
@@ -292,8 +346,8 @@ def _handle_os_ops(transcribed_text: str, row_id: int) -> None:
 
     if "upgrade yourself" in lower:
         agent = OSAgent()
-        _synth.speak("Opening VS Code to apply upgrades.")
-        log_brain("Upgrade self triggered.")
+        _speak("Opening VS Code to apply upgrades.")
+        _ui_log("Upgrade self triggered.")
         project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
         agent.open_vscode(project_root)
         update_output(row_id, "VS Code opened for self-upgrade")
@@ -303,7 +357,7 @@ def _handle_os_ops(transcribed_text: str, row_id: int) -> None:
 
     if any(k in lower for k in ("open vs code", "open vscode", "open visual studio")):
         agent = OSAgent()
-        _synth.speak("Opening VS Code.")
+        _speak("Opening VS Code.")
         agent.open_vscode()
         update_output(row_id, "VS Code opened")
         update_feedback(row_id, True)
@@ -316,9 +370,9 @@ def _handle_os_ops(transcribed_text: str, row_id: int) -> None:
             executed = orch.run_director_loop(transcribed_text, synth=_synth)
             update_output(row_id, "; ".join(executed) if executed else "no steps executed")
             update_feedback(row_id, bool(executed))
-            log_brain(f"OS_OPS director complete: {len(executed)} step(s)")
+            _ui_log(f"OS_OPS director complete: {len(executed)} step(s)")
         except Exception as e:
-            log_brain(f"OS_OPS thread error: {e}")
+            _ui_log(f"OS_OPS thread error: {e}")
             set_exec_state("FAILED", "OS_OPS error")
             update_feedback(row_id, False)
 
@@ -338,7 +392,7 @@ def _activate_deep_focus() -> None:
         name="AfroDeepFocus",
     )
     _focus_thread.start()
-    log_brain("Deep Focus mode activated.")
+    _ui_log("Deep Focus mode activated.")
     print("[Main] Deep Focus mode ACTIVE.")
 
 
@@ -349,40 +403,56 @@ def _deactivate_deep_focus() -> None:
     deep_focus_active = False
     stop_deep_focus()
     stop_hud()
-    log_brain("Deep Focus mode deactivated.")
+    _ui_log("Deep Focus mode deactivated.")
     print("[Main] Deep Focus mode STANDBY.")
 
 
+# ── Wake-word callback ────────────────────────────────────────────────────────
+
 def on_wake_word_detected() -> None:
-    _synth.speak("Listening...")
-    log_brain("Wake word detected.")
+    _speak("Listening...")
+    _ui_log("Wake word detected.")
 
     print("Capturing command...")
     audio_data = capture_audio()
 
     if not audio_data:
         print("[Warning] No audio captured.")
-        log_brain("Warning: no audio captured.")
+        _ui_log("Warning: no audio captured.")
         return
 
     try:
         transcribed_text = process_speech(audio_data)
     except Exception as e:
         print(f"[Transcription error] {e}")
-        log_brain(f"Transcription error: {e}")
+        _ui_log(f"Transcription error: {e}")
         return
 
     if not transcribed_text:
         print("[Warning] Empty transcription.")
-        log_brain("Warning: empty transcription.")
+        _ui_log("Warning: empty transcription.")
         return
 
     print(f"User said: {transcribed_text}")
-    log_brain(f"User: {transcribed_text}")
+    _ui_log(f"User: {transcribed_text}")
 
     lower = transcribed_text.lower()
 
-    # ── special commands (pre-routing) ───────────────────────────
+    # ── local-first fast path (no API call) ──────────────────────
+    try:
+        from agents.local_router import match_local_intent
+        local_result = match_local_intent(transcribed_text)
+        if isinstance(local_result, dict) and local_result.get("status") == "HANDLED":
+            action  = local_result.get("action", "local")
+            details = local_result.get("details", {})
+            row_id  = log_command(transcribed_text, action.upper())
+            _ui_log(f"Local: {action} {details}")
+            update_feedback(row_id, True)
+            return
+    except Exception as e:
+        _ui_log(f"LocalRouter error (continuing to LLM): {e}")
+
+    # ── special commands (pre-routing) ────────────────────────────
 
     if "remember this" in lower:
         row_id = log_command(transcribed_text, "REMEMBER")
@@ -402,11 +472,11 @@ def on_wake_word_detected() -> None:
 
     if "review logs" in lower or "run meta review" in lower:
         row_id = log_command(transcribed_text, "META_REVIEW")
-        _synth.speak("Running system review. This may take a moment.")
+        _speak("Running system review. This may take a moment.")
         threading.Thread(
             target=lambda: (
                 run_review_on_command(),
-                _synth.speak("Review complete. Check logs for suggestions."),
+                _speak("Review complete. Check logs for suggestions."),
                 update_feedback(row_id, True),
             ),
             daemon=True,
@@ -417,7 +487,7 @@ def on_wake_word_detected() -> None:
     if any(k in lower for k in _OS_TRIGGER_KEYWORDS):
         row_id = log_command(transcribed_text, "OS_OPS")
         set_exec_state("RUNNING", transcribed_text[:60])
-        log_brain(f"OS_OPS: {transcribed_text[:80]}")
+        _ui_log(f"OS_OPS: {transcribed_text[:80]}")
         _handle_os_ops(transcribed_text, row_id)
         return
 
@@ -425,14 +495,14 @@ def on_wake_word_detected() -> None:
     if any(k in lower for k in ("enter deep focus", "deep focus mode", "focus mode", "start focus")):
         row_id = log_command(transcribed_text, "ENTER_FOCUS")
         threading.Thread(target=_activate_deep_focus, daemon=True).start()
-        _synth.speak("Deep Focus mode activated.")
+        _speak("Deep Focus mode activated.")
         update_feedback(row_id, True)
         return
 
     if any(k in lower for k in ("standby", "exit focus", "stop focus", "leave focus", "deactivate focus")):
         row_id = log_command(transcribed_text, "EXIT_FOCUS")
         threading.Thread(target=_deactivate_deep_focus, daemon=True).start()
-        _synth.speak("Returning to normal mode.")
+        _speak("Returning to normal mode.")
         update_feedback(row_id, True)
         return
 
@@ -440,29 +510,29 @@ def on_wake_word_detected() -> None:
     try:
         intent_label = _intent_router.route(transcribed_text)
     except (ConnectionError, TimeoutError) as e:
-        log_brain(f"Intent routing connection error — keyword fallback: {e}")
-        _synth.speak("API quota exceeded. Falling back to local keyword engine.")
+        _ui_log(f"Intent routing connection error — keyword fallback: {e}")
+        _speak("API quota exceeded. Falling back to local keyword engine.")
         intent_label = _keyword_route_fallback(lower)
     except Exception as e:
-        log_brain(f"Intent routing failed — keyword fallback: {e}")
+        _ui_log(f"Intent routing failed — keyword fallback: {e}")
         if _is_api_error(e):
-            _synth.speak("API quota exceeded. Falling back to local keyword engine.")
+            _speak("API quota exceeded. Falling back to local keyword engine.")
         else:
-            _synth.speak("API quota exceeded. Falling back to local keyword engine.")
+            _speak("Routing failed. Using keyword engine.")
         intent_label = _keyword_route_fallback(lower)
 
     print(f"Intent: {intent_label}")
-    log_brain(f"Intent: {intent_label}")
+    _ui_log(f"Intent: {intent_label}")
 
     row_id = log_command(transcribed_text, intent_label)
 
     if intent_label == "ENTER_FOCUS":
         threading.Thread(target=_activate_deep_focus, daemon=True).start()
-        _synth.speak("Deep Focus mode activated.")
+        _speak("Deep Focus mode activated.")
         update_feedback(row_id, True)
     elif intent_label == "EXIT_FOCUS":
         threading.Thread(target=_deactivate_deep_focus, daemon=True).start()
-        _synth.speak("Returning to normal mode.")
+        _speak("Returning to normal mode.")
         update_feedback(row_id, True)
     elif intent_label == "PROCESS_OPS":
         _handle_process_ops(transcribed_text, row_id)
@@ -473,13 +543,13 @@ def on_wake_word_detected() -> None:
             daemon=True,
         ).start()
     else:
-        _synth.speak(f"Routing to {intent_label}")
+        _speak(f"Routing to {intent_label}")
         update_feedback(row_id, True)
 
 
-class AfroListener(VoiceListener):
-    """Extends VoiceListener to trigger a callback on wake-word detection."""
+# ── Listener subclass ─────────────────────────────────────────────────────────
 
+class AfroListener(VoiceListener):
     def __init__(self, callback):
         super().__init__()
         self._callback = callback
@@ -488,7 +558,7 @@ class AfroListener(VoiceListener):
         print("Listening for wake word...")
         while not self._shutdown:
             try:
-                raw = self.stream.read(FRAME_LENGTH, exception_on_overflow=False)
+                raw   = self.stream.read(FRAME_LENGTH, exception_on_overflow=False)
                 frame = np.frombuffer(raw, dtype=np.int16)
                 prediction = self.oww_model.predict(frame)
 
@@ -508,6 +578,34 @@ class AfroListener(VoiceListener):
                 time.sleep(0.1)
 
 
+# ── GUI listener thread target ────────────────────────────────────────────────
+
+def _on_gui_start() -> None:
+    """Called from CockpitUI ACTIVATE button — runs in daemon thread."""
+    global _listener
+    _speak("Afro online. Say hey Jarvis to activate.")
+    _listener = AfroListener(callback=on_wake_word_detected)
+    try:
+        _listener.start()
+    except Exception as e:
+        print(f"[Listener error] {e}")
+        _ui_log(f"Listener error: {e}")
+
+
+def _on_gui_stop() -> None:
+    """Called from CockpitUI STANDBY button."""
+    global _listener
+    if _listener is not None:
+        _listener._shutdown = True
+        try:
+            _listener._cleanup()
+        except Exception:
+            pass
+    _ui_log("Listener stopped via GUI.")
+
+
+# ── Shutdown ──────────────────────────────────────────────────────────────────
+
 def _shutdown_all(listener: "AfroListener | None" = None) -> None:
     print("\nAfro shutting down...")
     if deep_focus_active:
@@ -523,8 +621,10 @@ def _shutdown_all(listener: "AfroListener | None" = None) -> None:
             pass
 
 
+# ── Entry point ───────────────────────────────────────────────────────────────
+
 def main() -> None:
-    global _listener
+    global _listener, _qt_app, _cockpit, _bridge
 
     print("Project Afro Starting...")
 
@@ -533,7 +633,7 @@ def main() -> None:
 
     start_dashboard()
     print("Dashboard running at http://127.0.0.1:5000")
-    log_brain("Afro system started.")
+    _ui_log("Afro system started.")
 
     start_meta_agent()
     print("Meta-agent scheduled (24h review cycle).")
@@ -544,7 +644,45 @@ def main() -> None:
     _scheduler.run_loop()
     print("Scheduler agent started.")
 
-    print("Initializing voice system...")
+    # Build app index in background (non-blocking)
+    try:
+        from agents.app_indexer import start_background_indexing
+        start_background_indexing()
+        print("App indexer started (background).")
+    except Exception as e:
+        print(f"[AppIndexer] Could not start: {e}")
+
+    # ── GUI mode ──────────────────────────────────────────────────
+    if _QT_AVAILABLE:
+        try:
+            _qt_app, _cockpit = launch_cockpit(
+                on_start=lambda: threading.Thread(
+                    target=_on_gui_start,
+                    daemon=True,
+                    name="AfroListener",
+                ).start(),
+                on_stop=_on_gui_stop,
+            )
+
+            _bridge = _UiBridge()
+            _bridge.speaking_changed.connect(_cockpit.set_speaking)
+            _bridge.log_message.connect(_cockpit.append_log)
+
+            print("CockpitUI launched.")
+            _ui_log("CockpitUI mode active.")
+
+            try:
+                sys.exit(_qt_app.exec())
+            except SystemExit:
+                pass
+            finally:
+                _shutdown_all(_listener)
+            return
+        except Exception as e:
+            print(f"[CockpitUI] Launch failed ({e}) — falling back to headless mode.")
+
+    # ── Headless fallback ─────────────────────────────────────────
+    print("Initializing voice system (headless mode)...")
     _listener = AfroListener(callback=on_wake_word_detected)
 
     try:
