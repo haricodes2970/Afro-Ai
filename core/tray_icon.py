@@ -1,0 +1,167 @@
+import os
+import sys
+import threading
+import webbrowser
+
+import pystray
+from PIL import Image, ImageDraw
+
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
+DASHBOARD_URL = "http://127.0.0.1:5000"
+
+# Palette
+_COLOR_ACTIVE = (34, 197, 94)    # green
+_COLOR_IDLE   = (100, 116, 139)  # slate-gray
+_OUTLINE      = (255, 255, 255)
+_SIZE         = 64
+
+
+def _make_icon(color: tuple[int, int, int]) -> Image.Image:
+    img  = Image.new("RGBA", (_SIZE, _SIZE), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    pad  = 4
+    draw.ellipse([pad, pad, _SIZE - pad, _SIZE - pad],
+                 fill=color, outline=_OUTLINE, width=2)
+    # "A" glyph centred
+    try:
+        from PIL import ImageFont
+        font = ImageFont.load_default()
+        draw.text((_SIZE // 2 - 5, _SIZE // 2 - 7), "A", fill=_OUTLINE, font=font)
+    except Exception:
+        draw.text((_SIZE // 2 - 5, _SIZE // 2 - 7), "A", fill=_OUTLINE)
+    return img
+
+
+class TrayIconManager:
+    """System tray icon with real-time agent state and action menu."""
+
+    def __init__(
+        self,
+        on_deep_focus=None,
+        on_exit=None,
+    ):
+        self._on_deep_focus = on_deep_focus   # callable() → triggers deep focus
+        self._on_exit       = on_exit         # callable() → clean shutdown
+        self._icon: pystray.Icon | None = None
+        self._thread: threading.Thread | None = None
+        self._state = "IDLE"
+        self._lock  = threading.Lock()
+
+    # ── Icon factory ────────────────────────────────────────────────
+
+    def _icon_for_state(self) -> Image.Image:
+        color = _COLOR_ACTIVE if self._state == "ACTIVE" else _COLOR_IDLE
+        return _make_icon(color)
+
+    # ── Menu callbacks ──────────────────────────────────────────────
+
+    def _cb_dashboard(self, icon, item) -> None:
+        try:
+            webbrowser.open(DASHBOARD_URL)
+        except Exception as e:
+            print(f"[TrayIcon] Dashboard open error: {e}")
+
+    def _cb_deep_focus(self, icon, item) -> None:
+        if self._on_deep_focus:
+            try:
+                threading.Thread(
+                    target=self._on_deep_focus,
+                    daemon=True,
+                    name="AfroTrayFocus",
+                ).start()
+            except Exception as e:
+                print(f"[TrayIcon] Deep focus trigger error: {e}")
+
+    def _cb_restart(self, icon, item) -> None:
+        print("[TrayIcon] Restart requested via tray.")
+        icon.stop()
+        try:
+            import time
+            time.sleep(0.3)
+            os.execv(sys.executable, ["python"] + sys.argv)
+        except Exception as e:
+            print(f"[TrayIcon] Restart failed: {e}")
+
+    def _cb_exit(self, icon, item) -> None:
+        print("[TrayIcon] Exit requested via tray.")
+        icon.stop()
+        if self._on_exit:
+            try:
+                self._on_exit()
+            except Exception:
+                pass
+        os._exit(0)
+
+    # ── State update ────────────────────────────────────────────────
+
+    def set_state(self, state: str) -> None:
+        """Update icon color. state: 'ACTIVE' | 'IDLE'"""
+        if state not in ("ACTIVE", "IDLE"):
+            return
+        with self._lock:
+            if self._state == state:
+                return
+            self._state = state
+
+        if self._icon is not None:
+            try:
+                self._icon.icon  = self._icon_for_state()
+                self._icon.title = f"Afro — {state}"
+            except Exception:
+                pass
+
+    # ── Lifecycle ───────────────────────────────────────────────────
+
+    def _run(self) -> None:
+        try:
+            menu = pystray.Menu(
+                pystray.MenuItem("Open Dashboard",   self._cb_dashboard),
+                pystray.MenuItem("Enter Deep Focus", self._cb_deep_focus),
+                pystray.MenuItem("Restart Agent",    self._cb_restart),
+                pystray.Menu.SEPARATOR,
+                pystray.MenuItem("Exit",             self._cb_exit),
+            )
+            self._icon = pystray.Icon(
+                name  = "Afro",
+                icon  = self._icon_for_state(),
+                title = f"Afro — {self._state}",
+                menu  = menu,
+            )
+            self._icon.run()
+        except Exception as e:
+            print(f"[TrayIcon] Fatal error in tray thread: {e}")
+
+    def start(self) -> None:
+        """Launch tray in a daemon background thread."""
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name="AfroTrayIcon",
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        if self._icon is not None:
+            try:
+                self._icon.stop()
+            except Exception:
+                pass
+
+
+# ── Module-level singleton ───────────────────────────────────────────────────
+
+_manager: TrayIconManager | None = None
+
+
+def init_tray(on_deep_focus=None, on_exit=None) -> TrayIconManager:
+    global _manager
+    _manager = TrayIconManager(on_deep_focus=on_deep_focus, on_exit=on_exit)
+    _manager.start()
+    return _manager
+
+
+def set_tray_state(state: str) -> None:
+    """Thread-safe state update callable from anywhere."""
+    if _manager is not None:
+        _manager.set_state(state)
