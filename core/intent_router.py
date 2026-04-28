@@ -5,7 +5,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# --- dependency detection ---
+# ── Dependency detection ──────────────────────────────────────────────────────
 
 try:
     from llama_cpp import Llama
@@ -14,28 +14,30 @@ except ImportError:
     _llama_available = False
 
 try:
-    from langchain_core.messages import HumanMessage, SystemMessage
-    from langchain_openai import ChatOpenAI
-    _langchain_available = True
+    import groq as _groq_lib
+    _groq_available = bool(os.getenv("GROQ_API_KEY", "").strip())
 except ImportError:
-    _langchain_available = False
-    if not _llama_available:
-        print(
-            "[IntentRouter] LangChain not installed. Using keyword routing.\n"
-            "  pip install langchain langchain-openai langchain-core"
-        )
+    _groq_available = False
 
-# llm_mode: LLAMA_CPP > LANGCHAIN > KEYWORD
+try:
+    import google.generativeai as _genai
+    _gemini_available = bool(os.getenv("GEMINI_API_KEY", "").strip())
+except ImportError:
+    _gemini_available = False
+
+# Priority: LLAMA_CPP → GROQ → GEMINI → KEYWORD
 if _llama_available:
     _llm_mode = "LLAMA_CPP"
-elif _langchain_available:
-    _llm_mode = "LANGCHAIN"
+elif _groq_available:
+    _llm_mode = "GROQ"
+elif _gemini_available:
+    _llm_mode = "GEMINI"
 else:
     _llm_mode = "KEYWORD"
 
 print(f"[IntentRouter] Mode: {_llm_mode}")
 
-# ---
+# ── Constants ─────────────────────────────────────────────────────────────────
 
 VALID_LABELS = {
     "FILE_OPS", "PROCESS_OPS", "CALENDAR_OPS", "SYSTEM_QUERY",
@@ -45,14 +47,14 @@ VALID_LABELS = {
 }
 
 FILE_OP_KEYWORDS = {
-    "delete": "DELETE",
-    "remove": "DELETE",
-    "sort": "SORT",
+    "delete":   "DELETE",
+    "remove":   "DELETE",
+    "sort":     "SORT",
     "organise": "SORT",
     "organize": "SORT",
-    "clean": "CLEAN",
-    "cleanup": "CLEAN",
-    "rename": "RENAME",
+    "clean":    "CLEAN",
+    "cleanup":  "CLEAN",
+    "rename":   "RENAME",
 }
 
 SYSTEM_PROMPT = (
@@ -71,69 +73,31 @@ SYSTEM_PROMPT = (
     "UNKNOWN — anything else"
 )
 
-_USE_OPENAI = bool(os.getenv("OPENAI_API_KEY", "").strip())
+# ── llama.cpp model (loaded once at import) ───────────────────────────────────
 
+_llm = None
 
-def _build_llm():
-    if _llm_mode == "LLAMA_CPP":
-        model_path = os.getenv(
-            "LOCAL_MODEL_PATH",
-            os.path.join("models", "llama.gguf"),
-        )
-        try:
-            print(f"[IntentRouter] Loading llama.cpp model: {model_path}")
-            return Llama(
-                model_path=model_path,
-                n_ctx=512,
-                n_gpu_layers=20,
-                verbose=False,
-            )
-        except Exception as e:
-            print(f"[IntentRouter] llama.cpp load failed: {e}. Falling back.", file=sys.stderr)
-            return None
+if _llm_mode == "LLAMA_CPP":
+    try:
+        _model_path = os.getenv("LOCAL_MODEL_PATH", os.path.join("models", "llama.gguf"))
+        print(f"[IntentRouter] Loading llama.cpp model: {_model_path}")
+        _llm = Llama(model_path=_model_path, n_ctx=512, n_gpu_layers=20, verbose=False)
+    except Exception as e:
+        print(f"[IntentRouter] llama.cpp load failed: {e} — switching to GROQ/GEMINI/KEYWORD",
+              file=sys.stderr)
+        _llm = None
+        _llm_mode = "GROQ" if _groq_available else ("GEMINI" if _gemini_available else "KEYWORD")
+        print(f"[IntentRouter] Mode updated: {_llm_mode}")
 
-    if _llm_mode == "LANGCHAIN":
-        if _USE_OPENAI:
-            try:
-                return ChatOpenAI(model="gpt-3.5-turbo", temperature=0)
-            except Exception as e:
-                print(f"[IntentRouter] ChatOpenAI init failed: {e}.", file=sys.stderr)
-                return None
-        else:
-            try:
-                from langchain_community.llms import LlamaCpp
-                model_path = os.getenv(
-                    "LOCAL_MODEL_PATH",
-                    os.path.expanduser("~/models/mistral-7b-instruct.Q4_K_M.gguf"),
-                )
-                print(f"[IntentRouter] LangChain local mode — loading: {model_path}")
-                return LlamaCpp(
-                    model_path=model_path,
-                    temperature=0,
-                    max_tokens=16,
-                    n_ctx=512,
-                    n_gpu_layers=20,
-                    verbose=False,
-                )
-            except Exception as e:
-                print(f"[IntentRouter] LangChain local LLM failed: {e}.", file=sys.stderr)
-                return None
-
-    return None
-
-
-_llm = _build_llm()
-
+# ── Keyword fallback ──────────────────────────────────────────────────────────
 
 def _keyword_route(text: str) -> str:
     lower = text.lower()
 
-    # Focus controls — check before generic keywords
     if any(k in lower for k in ("deep focus", "focus mode", "enter focus", "start focus")):
         return "ENTER_FOCUS"
     if any(k in lower for k in ("standby", "exit focus", "stop focus", "leave focus", "deactivate focus")):
         return "EXIT_FOCUS"
-
     if any(k in lower for k in ("optimize", "refactor", "improve", "speed up")):
         return "DEV_OPTIMIZE"
     if any(k in lower for k in ("explain", "describe", "summarize", "what does")):
@@ -150,37 +114,65 @@ def _keyword_route(text: str) -> str:
         return "SYSTEM_QUERY"
     return "UNKNOWN"
 
+# ── LLM routing functions ─────────────────────────────────────────────────────
 
 def _route_llama_cpp(text: str) -> str:
-    prompt = (
-        f"{SYSTEM_PROMPT}\n\n"
-        f"User: {text.strip()}\n"
-        "Label:"
-    )
-    output = _llm(
-        prompt,
+    prompt = f"{SYSTEM_PROMPT}\n\nUser: {text.strip()}\nLabel:"
+    output = _llm(prompt, max_tokens=8, temperature=0, stop=["\n", " ", "."])
+    label  = output["choices"][0]["text"].strip().upper()
+    return label if label in VALID_LABELS else _keyword_route(text)
+
+
+def _route_groq(text: str) -> str:
+    api_key = os.getenv("GROQ_API_KEY", "").strip()
+    client  = _groq_lib.Groq(api_key=api_key)
+    resp = client.chat.completions.create(
+        model="llama3-8b-8192",
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user",   "content": text.strip()},
+        ],
         max_tokens=8,
         temperature=0,
-        stop=["\n", " ", "."],
     )
-    label = output["choices"][0]["text"].strip().upper()
+    label = resp.choices[0].message.content.strip().upper().split()[0]
     return label if label in VALID_LABELS else _keyword_route(text)
 
 
-def _route_langchain(text: str) -> str:
-    if _USE_OPENAI:
-        messages = [
-            SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(content=text.strip()),
-        ]
-        response = _llm.invoke(messages)
-        label = response.content.strip().upper()
-    else:
-        prompt = f"{SYSTEM_PROMPT}\n\nUser: {text.strip()}\nLabel:"
-        raw = _llm.invoke(prompt)
-        label = (raw.strip() if isinstance(raw, str) else raw.content.strip()).upper().split()[0]
+def _route_gemini(text: str) -> str:
+    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    _genai.configure(api_key=api_key)
+    model  = _genai.GenerativeModel("gemini-1.5-flash")
+    prompt = f"{SYSTEM_PROMPT}\n\nUser: {text.strip()}\nLabel:"
+    resp   = model.generate_content(prompt)
+    label  = resp.text.strip().upper().split()[0]
     return label if label in VALID_LABELS else _keyword_route(text)
 
+
+def _call_router(text: str) -> str:
+    """
+    Try Groq first, fall back to Gemini, fall back to keyword.
+    Used when LLAMA_CPP is not available.
+    """
+    if _groq_available:
+        try:
+            return _route_groq(text)
+        except Exception as e:
+            err = str(e).lower()
+            if "429" in err or "quota" in err or "rate" in err:
+                print(f"[IntentRouter] Groq quota hit — trying Gemini: {e}", file=sys.stderr)
+            else:
+                print(f"[IntentRouter] Groq error — trying Gemini: {e}", file=sys.stderr)
+
+    if _gemini_available:
+        try:
+            return _route_gemini(text)
+        except Exception as e:
+            print(f"[IntentRouter] Gemini error — keyword fallback: {e}", file=sys.stderr)
+
+    return _keyword_route(text)
+
+# ── File / dev dispatch helpers ───────────────────────────────────────────────
 
 def _extract_operation(text: str) -> str:
     lower = text.lower()
@@ -203,11 +195,10 @@ def _extract_directory(text: str) -> str:
 
 def _dispatch_file_ops(transcribed_text: str) -> None:
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-
     from agents.file_agent import FileAgent
     from core.safety import confirm_action
 
-    operation_type = _extract_operation(transcribed_text)
+    operation_type   = _extract_operation(transcribed_text)
     target_directory = _extract_directory(transcribed_text)
     agent = FileAgent()
 
@@ -233,27 +224,21 @@ def _dispatch_dev_ops(intent_label: str) -> None:
     from agents.orchestrator import Orchestrator
     Orchestrator().run_dev_loop(intent_label)
 
+# ── Public interface ──────────────────────────────────────────────────────────
 
 class IntentRouter:
-    def __init__(self):
-        self._llm = _llm
-        self._llm_mode = _llm_mode
-
     def route(self, transcribed_text: str) -> str:
         if not transcribed_text or not transcribed_text.strip():
             return "UNKNOWN"
 
         label = "UNKNOWN"
-
         try:
-            if self._llm_mode == "LLAMA_CPP" and self._llm is not None:
+            if _llm_mode == "LLAMA_CPP" and _llm is not None:
                 label = _route_llama_cpp(transcribed_text)
-            elif self._llm_mode == "LANGCHAIN" and self._llm is not None:
-                label = _route_langchain(transcribed_text)
             else:
-                label = _keyword_route(transcribed_text)
+                label = _call_router(transcribed_text)
         except Exception as e:
-            print(f"[IntentRouter error] {e}", file=sys.stderr)
+            print(f"[IntentRouter] Routing error — keyword fallback: {e}", file=sys.stderr)
             label = _keyword_route(transcribed_text)
 
         if label not in VALID_LABELS:
