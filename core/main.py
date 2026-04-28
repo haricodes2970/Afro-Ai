@@ -14,8 +14,10 @@ from voice.transcribe import process_speech
 from core.intent_router import IntentRouter
 from core.system_tray import start_tray
 from core.dashboard import start_dashboard, log_brain
+from core.memory import log_command, update_output, update_feedback, remember
 from agents.process_agent import ProcessAgent
 from agents.dev_agent import DevAgent
+from agents.meta_agent import start_meta_agent, run_review_on_command
 
 SAMPLE_RATE = 16000
 CAPTURE_SECONDS = 5
@@ -90,33 +92,42 @@ def _extract_process_op(text: str) -> tuple[str, str]:
     return op, process_name
 
 
-def _handle_process_ops(transcribed_text: str) -> None:
+def _handle_process_ops(transcribed_text: str, row_id: int) -> None:
     agent = ProcessAgent()
     op, process_name = _extract_process_op(transcribed_text)
 
     if op == "STATUS":
         agent.status()
         speak("Here are the top running processes.")
+        update_output(row_id, "STATUS displayed")
+        update_feedback(row_id, True)
 
     elif op == "KILL":
         if not process_name:
             speak("Please specify a process name to kill.")
+            update_feedback(row_id, False)
             return
         freed_mb = agent.kill(process_name)
         if freed_mb > 0:
             speak(f"Process terminated. Freed {freed_mb:.0f} MB RAM")
+            update_output(row_id, f"Killed {process_name}, freed {freed_mb:.1f} MB")
+            update_feedback(row_id, True)
         else:
             speak(f"Could not find process {process_name}")
+            update_feedback(row_id, False)
 
     elif op == "OPTIMIZE":
         freed_mb = agent.optimize()
         if freed_mb > 0:
             speak(f"Optimization complete. Freed {freed_mb:.0f} MB RAM")
+            update_output(row_id, f"Freed {freed_mb:.1f} MB")
+            update_feedback(row_id, True)
         else:
             speak("No bloatware processes found running.")
+            update_feedback(row_id, False)
 
 
-def _handle_dev_ops(intent_label: str, transcribed_text: str) -> None:
+def _handle_dev_ops(intent_label: str, transcribed_text: str, row_id: int) -> None:
     agent = DevAgent()
 
     if intent_label == "DEV_OPTIMIZE" or "optimize this" in transcribed_text.lower():
@@ -126,9 +137,12 @@ def _handle_dev_ops(intent_label: str, transcribed_text: str) -> None:
         if result:
             speak("Code optimized and ready to paste.")
             log_brain("DEV_OPTIMIZE complete.")
+            update_output(row_id, result[:500])
+            update_feedback(row_id, True)
         else:
             speak("Clipboard was empty or optimization failed.")
             log_brain("DEV_OPTIMIZE failed — empty clipboard or LLM error.")
+            update_feedback(row_id, False)
 
     elif intent_label == "DEV_EXPLAIN":
         speak("Analyzing code on clipboard...")
@@ -137,9 +151,12 @@ def _handle_dev_ops(intent_label: str, transcribed_text: str) -> None:
         if result:
             speak("Explanation ready. Check your clipboard.")
             log_brain("DEV_EXPLAIN complete.")
+            update_output(row_id, result[:500])
+            update_feedback(row_id, True)
         else:
             speak("Clipboard was empty or explanation failed.")
             log_brain("DEV_EXPLAIN failed.")
+            update_feedback(row_id, False)
 
     elif intent_label == "DEV_DEBUG":
         speak("Analyzing code on clipboard...")
@@ -148,9 +165,37 @@ def _handle_dev_ops(intent_label: str, transcribed_text: str) -> None:
         if result:
             speak("Debug complete. Fixed code is ready to paste.")
             log_brain("DEV_DEBUG complete.")
+            update_output(row_id, result[:500])
+            update_feedback(row_id, True)
         else:
             speak("Clipboard was empty or debug failed.")
             log_brain("DEV_DEBUG failed.")
+            update_feedback(row_id, False)
+
+
+def _handle_remember(transcribed_text: str) -> None:
+    """Extract content after 'remember this' and store to long-term memory."""
+    lower = transcribed_text.lower()
+    marker = "remember this"
+    idx = lower.find(marker)
+
+    if idx != -1:
+        content = transcribed_text[idx + len(marker):].strip(" ,.:")
+    else:
+        content = transcribed_text.strip()
+
+    if not content:
+        speak("What should I remember? Please say the content after 'remember this'.")
+        return
+
+    stored = remember(content)
+    if stored:
+        speak("Got it. I'll remember that.")
+        log_brain(f"Remembered: {content[:80]}")
+        print(f"[Memory] Stored: {content}")
+    else:
+        speak("I already have that in memory.")
+        log_brain(f"Already remembered: {content[:80]}")
 
 
 def on_wake_word_detected() -> None:
@@ -180,20 +225,46 @@ def on_wake_word_detected() -> None:
     print(f"User said: {transcribed_text}")
     log_brain(f"User: {transcribed_text}")
 
+    lower = transcribed_text.lower()
+
+    # ── special commands (pre-routing) ───────────────────────────
+    if "remember this" in lower:
+        row_id = log_command(transcribed_text, "REMEMBER")
+        _handle_remember(transcribed_text)
+        update_feedback(row_id, True)
+        return
+
+    if "review logs" in lower or "run meta review" in lower:
+        row_id = log_command(transcribed_text, "META_REVIEW")
+        speak("Running system review. This may take a moment.")
+        threading.Thread(
+            target=lambda: (
+                run_review_on_command(),
+                speak("Review complete. Check logs for suggestions."),
+                update_feedback(row_id, True),
+            ),
+            daemon=True,
+        ).start()
+        return
+
+    # ── normal intent routing ─────────────────────────────────────
     intent_label = _intent_router.route(transcribed_text)
     print(f"Intent: {intent_label}")
     log_brain(f"Intent: {intent_label}")
 
+    row_id = log_command(transcribed_text, intent_label)
+
     if intent_label == "PROCESS_OPS":
-        _handle_process_ops(transcribed_text)
+        _handle_process_ops(transcribed_text, row_id)
     elif intent_label in ("DEV_OPTIMIZE", "DEV_EXPLAIN", "DEV_DEBUG"):
         threading.Thread(
             target=_handle_dev_ops,
-            args=(intent_label, transcribed_text),
+            args=(intent_label, transcribed_text, row_id),
             daemon=True,
         ).start()
     else:
         speak(f"Routing to {intent_label}")
+        update_feedback(row_id, True)
 
 
 class AfroListener(VoiceListener):
@@ -234,6 +305,9 @@ def main() -> None:
     start_dashboard()
     print("Dashboard running at http://127.0.0.1:5000")
     log_brain("Afro system started.")
+
+    start_meta_agent()
+    print("Meta-agent scheduled (24h review cycle).")
 
     print("Initializing voice system...")
     listener = AfroListener(callback=on_wake_word_detected)
