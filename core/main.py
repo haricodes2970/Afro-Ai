@@ -10,12 +10,14 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from voice.listener import VoiceListener
 from voice.transcribe import process_speech
+from core.intent_router import IntentRouter
 
 SAMPLE_RATE = 16000
 CAPTURE_SECONDS = 5
 CHUNK = 1024
 
 _tts_engine = pyttsx3.init()
+_intent_router = IntentRouter()
 
 
 def speak(text: str) -> None:
@@ -54,18 +56,8 @@ def capture_audio() -> bytes:
     return b"".join(frames)
 
 
-def route_intent(text: str) -> None:
-    lower = text.lower()
-    if any(kw in lower for kw in ("file", "sort")):
-        print("Routing to File Agent")
-    elif any(kw in lower for kw in ("kill", "stop")):
-        print("Routing to Process Agent")
-    else:
-        print("Command not recognized, initiating Self-Evolution loop logging")
-
-
 def on_wake_word_detected() -> None:
-    speak("Yes sir, I am listening")
+    speak("Listening...")
 
     print("Capturing command...")
     audio_data = capture_audio()
@@ -75,15 +67,20 @@ def on_wake_word_detected() -> None:
         return
 
     try:
-        text = process_speech(audio_data)
+        transcribed_text = process_speech(audio_data)
     except Exception as e:
         print(f"[Transcription error] {e}")
         return
 
-    print(f"User said: {text}")
+    if not transcribed_text:
+        print("[Warning] Empty transcription.")
+        return
 
-    if text:
-        route_intent(text)
+    print(f"User said: {transcribed_text}")
+
+    intent_label = _intent_router.route(transcribed_text)
+    print(f"Intent: {intent_label}")
+    speak(f"Routing to {intent_label}")
 
 
 class AfroListener(VoiceListener):
