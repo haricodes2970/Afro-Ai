@@ -5,15 +5,15 @@ import threading
 
 import numpy as np
 import pyaudio
-import pyttsx3
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from voice.listener import VoiceListener, FRAME_LENGTH, DETECTION_THRESHOLD
 from voice.transcribe import process_speech
+from voice.synthesizer import VoiceSynthesizer
 from core.intent_router import IntentRouter
 from core.system_tray import start_tray
-from core.dashboard import start_dashboard, log_brain
+from core.dashboard import start_dashboard, log_brain, socketio
 from core.memory import log_command, update_output, update_feedback, remember
 from agents.process_agent import ProcessAgent
 from agents.dev_agent import DevAgent
@@ -23,8 +23,21 @@ SAMPLE_RATE = 16000
 CAPTURE_SECONDS = 5
 CHUNK = 1024
 
-_tts_engine = pyttsx3.init()
+_synth = VoiceSynthesizer()
 _intent_router = IntentRouter()
+
+
+@socketio.on("set_mute")
+def _on_set_mute(data):
+    _synth.mute(bool(data.get("muted", False)))
+
+
+@socketio.on("set_speed")
+def _on_set_speed(data):
+    try:
+        _synth.set_speed(float(data.get("speed", 1.0)))
+    except (TypeError, ValueError):
+        pass
 
 PROCESS_OP_KEYWORDS = {
     "status": "STATUS",
@@ -35,11 +48,6 @@ PROCESS_OP_KEYWORDS = {
     "clean up": "OPTIMIZE",
     "cleanup": "OPTIMIZE",
 }
-
-
-def speak(text: str) -> None:
-    _tts_engine.say(text)
-    _tts_engine.runAndWait()
 
 
 def capture_audio() -> bytes:
@@ -98,32 +106,32 @@ def _handle_process_ops(transcribed_text: str, row_id: int) -> None:
 
     if op == "STATUS":
         agent.status()
-        speak("Here are the top running processes.")
+        _synth.speak("Here are the top running processes.")
         update_output(row_id, "STATUS displayed")
         update_feedback(row_id, True)
 
     elif op == "KILL":
         if not process_name:
-            speak("Please specify a process name to kill.")
+            _synth.speak("Please specify a process name to kill.")
             update_feedback(row_id, False)
             return
         freed_mb = agent.kill(process_name)
         if freed_mb > 0:
-            speak(f"Process terminated. Freed {freed_mb:.0f} MB RAM")
+            _synth.speak(f"Process terminated. Freed {freed_mb:.0f} MB RAM")
             update_output(row_id, f"Killed {process_name}, freed {freed_mb:.1f} MB")
             update_feedback(row_id, True)
         else:
-            speak(f"Could not find process {process_name}")
+            _synth.speak(f"Could not find process {process_name}")
             update_feedback(row_id, False)
 
     elif op == "OPTIMIZE":
         freed_mb = agent.optimize()
         if freed_mb > 0:
-            speak(f"Optimization complete. Freed {freed_mb:.0f} MB RAM")
+            _synth.speak(f"Optimization complete. Freed {freed_mb:.0f} MB RAM")
             update_output(row_id, f"Freed {freed_mb:.1f} MB")
             update_feedback(row_id, True)
         else:
-            speak("No bloatware processes found running.")
+            _synth.speak("No bloatware processes found running.")
             update_feedback(row_id, False)
 
 
@@ -131,44 +139,44 @@ def _handle_dev_ops(intent_label: str, transcribed_text: str, row_id: int) -> No
     agent = DevAgent()
 
     if intent_label == "DEV_OPTIMIZE" or "optimize this" in transcribed_text.lower():
-        speak("Analyzing code on clipboard...")
+        _synth.speak("Analyzing code on clipboard...")
         log_brain(f"DEV_OPTIMIZE triggered: {transcribed_text[:60]}")
         result = agent.optimize_code()
         if result:
-            speak("Code optimized and ready to paste.")
+            _synth.speak("Code optimized and ready to paste.")
             log_brain("DEV_OPTIMIZE complete.")
             update_output(row_id, result[:500])
             update_feedback(row_id, True)
         else:
-            speak("Clipboard was empty or optimization failed.")
+            _synth.speak("Clipboard was empty or optimization failed.")
             log_brain("DEV_OPTIMIZE failed — empty clipboard or LLM error.")
             update_feedback(row_id, False)
 
     elif intent_label == "DEV_EXPLAIN":
-        speak("Analyzing code on clipboard...")
+        _synth.speak("Analyzing code on clipboard...")
         log_brain(f"DEV_EXPLAIN triggered: {transcribed_text[:60]}")
         result = agent.explain_code()
         if result:
-            speak("Explanation ready. Check your clipboard.")
+            _synth.speak("Explanation ready. Check your clipboard.")
             log_brain("DEV_EXPLAIN complete.")
             update_output(row_id, result[:500])
             update_feedback(row_id, True)
         else:
-            speak("Clipboard was empty or explanation failed.")
+            _synth.speak("Clipboard was empty or explanation failed.")
             log_brain("DEV_EXPLAIN failed.")
             update_feedback(row_id, False)
 
     elif intent_label == "DEV_DEBUG":
-        speak("Analyzing code on clipboard...")
+        _synth.speak("Analyzing code on clipboard...")
         log_brain(f"DEV_DEBUG triggered: {transcribed_text[:60]}")
         result = agent.debug_code()
         if result:
-            speak("Debug complete. Fixed code is ready to paste.")
+            _synth.speak("Debug complete. Fixed code is ready to paste.")
             log_brain("DEV_DEBUG complete.")
             update_output(row_id, result[:500])
             update_feedback(row_id, True)
         else:
-            speak("Clipboard was empty or debug failed.")
+            _synth.speak("Clipboard was empty or debug failed.")
             log_brain("DEV_DEBUG failed.")
             update_feedback(row_id, False)
 
@@ -185,21 +193,21 @@ def _handle_remember(transcribed_text: str) -> None:
         content = transcribed_text.strip()
 
     if not content:
-        speak("What should I remember? Please say the content after 'remember this'.")
+        _synth.speak("What should I remember? Please say the content after 'remember this'.")
         return
 
     stored = remember(content)
     if stored:
-        speak("Got it. I'll remember that.")
+        _synth.speak("Got it. I'll remember that.")
         log_brain(f"Remembered: {content[:80]}")
         print(f"[Memory] Stored: {content}")
     else:
-        speak("I already have that in memory.")
+        _synth.speak("I already have that in memory.")
         log_brain(f"Already remembered: {content[:80]}")
 
 
 def on_wake_word_detected() -> None:
-    speak("Listening...")
+    _synth.speak("Listening...")
     log_brain("Wake word detected.")
 
     print("Capturing command...")
@@ -236,11 +244,11 @@ def on_wake_word_detected() -> None:
 
     if "review logs" in lower or "run meta review" in lower:
         row_id = log_command(transcribed_text, "META_REVIEW")
-        speak("Running system review. This may take a moment.")
+        _synth.speak("Running system review. This may take a moment.")
         threading.Thread(
             target=lambda: (
                 run_review_on_command(),
-                speak("Review complete. Check logs for suggestions."),
+                _synth.speak("Review complete. Check logs for suggestions."),
                 update_feedback(row_id, True),
             ),
             daemon=True,
@@ -263,7 +271,7 @@ def on_wake_word_detected() -> None:
             daemon=True,
         ).start()
     else:
-        speak(f"Routing to {intent_label}")
+        _synth.speak(f"Routing to {intent_label}")
         update_feedback(row_id, True)
 
 
