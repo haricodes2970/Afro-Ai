@@ -1,0 +1,8 @@
+pvporcupine
+faster-whisper
+pyaudio
+pyttsx3
+torch
+psutil
+langchain
+python-dotenv
