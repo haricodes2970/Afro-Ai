@@ -20,8 +20,10 @@ datas = [
     (str(ROOT / "config"),    "config"),
     # Flask templates
     (str(ROOT / "templates"), "templates"),
-    # Static assets (CSS)
+    # Static assets (CSS, JS)
     (str(ROOT / "static"),    "static"),
+    # Bundled icon (used by tray at runtime via sys._MEIPASS)
+    (str(ROOT / "assets"),    "assets"),
 ]
 
 # Include openwakeword model directory if it exists on this build machine
@@ -174,6 +176,6 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # icon="assets/afro.ico",       # uncomment and set path when icon asset is ready
+    icon=str(ROOT / "assets" / "afro.ico"),
     version_file=None,
 )
