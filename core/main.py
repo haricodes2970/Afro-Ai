@@ -621,10 +621,21 @@ def _on_gui_start() -> None:
         _ui_log("Listener already running.")
         return
 
-    # Step 1 — proactive greeting; orb drives to neon green then blue automatically
-    _speak("Afro Active. Systems initialized. What do you need?")
+    # Step 1 — proactive greeting; orb drives neon-green → blue automatically
+    _speak("Afro Online.")
 
-    # Step 2 — check state; may have been interrupted during greeting
+    # Step 2 — explicit speaking gate: ensure TTS fully finished before listener
+    # guards against muted/fast-return path where _is_speaking may reset async
+    _gate_start = time.monotonic()
+    while True:
+        with _state_lock:
+            if not _is_speaking:
+                break
+        if time.monotonic() - _gate_start > 10.0:   # hard timeout
+            break
+        time.sleep(0.05)
+
+    # Step 3 — check state; may have been interrupted during greeting
     with _state_lock:
         still_active = _agent_state == "ACTIVE"
 
@@ -632,10 +643,10 @@ def _on_gui_start() -> None:
         _ui_log("Standby received during greeting — aborting listener start.")
         return
 
-    # Step 3 — orb is already electric-blue (speaking_changed(False) was emitted)
+    # Step 4 — orb is already electric-blue (speaking_changed(False) was emitted)
     _ui_log("Listening for wake word...")
 
-    # Step 4 — start listener (blocking)
+    # Step 5 — start listener (blocking)
     _listener = AfroListener(callback=on_wake_word_detected)
     try:
         _listener.start()
@@ -743,10 +754,22 @@ def main() -> None:
                 on_stop=_on_gui_stop,
             )
 
+            from PyQt6.QtCore import Qt as _Qt
             _bridge = _UiBridge()
-            _bridge.speaking_changed.connect(_cockpit.set_speaking)
-            _bridge.log_message.connect(_cockpit.append_log)
-            _bridge.agent_state_changed.connect(_cockpit.set_agent_state)
+            # Explicit QueuedConnection — signals emitted from daemon threads
+            # must be queued to the main-thread event loop, never direct.
+            _bridge.speaking_changed.connect(
+                _cockpit.set_speaking,
+                _Qt.ConnectionType.QueuedConnection,
+            )
+            _bridge.log_message.connect(
+                _cockpit.append_log,
+                _Qt.ConnectionType.QueuedConnection,
+            )
+            _bridge.agent_state_changed.connect(
+                _cockpit.set_agent_state,
+                _Qt.ConnectionType.QueuedConnection,
+            )
 
             print("CockpitUI launched.")
             _ui_log("CockpitUI mode active.")
