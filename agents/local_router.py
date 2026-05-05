@@ -3,6 +3,7 @@ import re
 import sys
 import subprocess
 import difflib
+import shutil
 
 # ── App alias map ─────────────────────────────────────────────────────────────
 APP_ALIASES: dict[str, list[str]] = {
@@ -54,6 +55,36 @@ _RE_EXIT   = re.compile(r"^\s*(exit|quit|stop|goodbye)\s*$",        re.IGNORECAS
 
 _HOME = os.path.expanduser("~")
 
+# ── Windows App Paths registry lookup ────────────────────────────────────────
+
+def _win_find_exe(name: str) -> str | None:
+    """
+    Look up an executable via HKLM/HKCU App Paths registry.
+    Returns full path string if found and file exists, else None.
+    This finds browsers (brave, chrome, firefox) that are NOT in PATH.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg
+    except ImportError:
+        return None
+
+    exe = name if name.lower().endswith(".exe") else f"{name}.exe"
+    reg_path = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exe}"
+
+    for hive in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+        try:
+            with winreg.OpenKey(hive, reg_path) as key:
+                full_path, _ = winreg.QueryValueEx(key, "")
+                full_path = full_path.strip().strip('"')
+                if full_path and os.path.isfile(full_path):
+                    return full_path
+        except (FileNotFoundError, OSError):
+            continue
+
+    return None
+
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _normalize(text: str) -> str:
@@ -97,10 +128,14 @@ def _handle_open(raw_name: str) -> dict | str:
         if not raw_name:
             return "FALLBACK"
 
-        # 1. Alias table + difflib (known apps, fast)
+        # 1. Alias table + difflib (known apps, fast) → may be bare name e.g. "brave"
         normalized_app = _resolve_app(raw_name)
 
-        # 2. App indexer (full Start Menu scan, broader coverage)
+        # 2. Windows App Paths registry — resolves bare names to full .exe paths
+        #    Finds browsers, apps NOT in PATH (brave, chrome, firefox, etc.)
+        registry_path: str | None = _win_find_exe(normalized_app) if normalized_app else None
+
+        # 3. App indexer (full Start Menu .lnk scan)
         indexed_path: str | None = None
         try:
             from agents.app_indexer import get_app_path
@@ -116,10 +151,10 @@ def _handle_open(raw_name: str) -> dict | str:
                 start_background_indexing()
             except Exception:
                 pass
-            indexed_path = None  # fall through to alias table
+            indexed_path = None
 
-        # Prefer indexed full path; fall back to alias target
-        target = indexed_path or normalized_app
+        # Resolution priority: registry full path > indexed .lnk path > bare alias name
+        target = registry_path or indexed_path or normalized_app
         if not target:
             return "FALLBACK"
 
@@ -133,12 +168,18 @@ def _handle_open(raw_name: str) -> dict | str:
                 os.startfile(target)
                 launched = True
             except (OSError, FileNotFoundError):
-                # If startfile failed and we have an alias fallback, try that
-                if indexed_path and normalized_app and normalized_app != indexed_path:
+                # Primary target failed — try bare alias via shutil.which or PATH
+                for fallback in filter(None, [
+                    shutil.which(normalized_app) if normalized_app else None,
+                    normalized_app,
+                ]):
+                    if fallback == target:
+                        continue
                     try:
-                        os.startfile(normalized_app)
+                        os.startfile(fallback)
                         launched = True
-                        target = normalized_app
+                        target = fallback
+                        break
                     except (OSError, FileNotFoundError):
                         pass
 
