@@ -774,6 +774,24 @@ def main() -> None:
             print("CockpitUI launched.")
             _ui_log("CockpitUI mode active.")
 
+            # Wire IntegrityMonitor → _bridge signals (after bridge is set up)
+            try:
+                from core.integrity_monitor import init_integrity_monitor
+                init_integrity_monitor(
+                    on_log=_ui_log,
+                    on_admin_warning=_ui_log,
+                    on_network_change=lambda online: _ui_log(
+                        "Network restored — HYBRID mode." if online
+                        else "Network offline — LOCAL_ONLY mode."
+                    ),
+                    on_app_stale=lambda name: _ui_log(
+                        f"[INTEGRITY] Stale app path: {name} — index rebuild triggered."
+                    ),
+                )
+                print("IntegrityMonitor started.")
+            except Exception as e:
+                print(f"[IntegrityMonitor] Could not start: {e}")
+
             try:
                 sys.exit(_qt_app.exec())
             except SystemExit:
@@ -785,6 +803,12 @@ def main() -> None:
             print(f"[CockpitUI] Launch failed ({e}) — falling back to headless mode.")
 
     # ── Headless fallback ─────────────────────────────────────────
+    try:
+        from core.integrity_monitor import init_integrity_monitor
+        init_integrity_monitor(on_log=_ui_log, on_admin_warning=_ui_log)
+    except Exception as e:
+        print(f"[IntegrityMonitor] Could not start: {e}")
+
     global _agent_state
     with _state_lock:
         _agent_state = "ACTIVE"
